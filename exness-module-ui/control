@@ -1,6 +1,6 @@
 Package: com.vietanh.exnessmoduleui
 Name: Exness Module UI
-Version: 0.4.0
+Version: 0.4.1
 Architecture: iphoneos-arm64
 Description: Lifecycle-bound GUI editor for Exness with server-synced live fields, strict SwiftUI identity, responsive transforms, editable static text, images, and actions.
 Maintainer: Viet Anh

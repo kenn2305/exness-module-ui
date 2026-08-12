@@ -16,7 +16,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)sourceView:(UIView *)sourceView didSetHidden:(BOOL)hidden;
 - (void)sourceView:(UIView *)sourceView didSetAlpha:(CGFloat)alpha;
 - (void)sourceLifecycleDidChange:(UIView *)sourceView;
-- (BOOL)sourceContentDidChange:(UIView *)sourceView;
 - (void)applyScreenID:(NSString *)screenID
              rootView:(UIView *)rootView
                tabBar:(nullable UITabBar *)tabBar;

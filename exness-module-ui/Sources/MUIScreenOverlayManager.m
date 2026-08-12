@@ -254,16 +254,6 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     [self sourceVisibilityDidChange:sourceView];
 }
 
-- (BOOL)sourceContentDidChange:(UIView *)sourceView {
-    if (self.synchronizingAttachment || !sourceView) return NO;
-    // Direct native transforms intentionally survive server-driven redraws.
-    // A replacement overlay must be revalidated because its source may now
-    // represent a loading placeholder or a different recycled SwiftUI field.
-    if (![self.attachedOverlaysBySource objectForKey:sourceView]) return NO;
-    [self detachSourceView:sourceView];
-    return YES;
-}
-
 - (NSString *)stableTextIdentifierWithBase:(NSString *)base
                                       text:(NSString *)text
                                      frame:(CGRect)frame {
@@ -807,11 +797,24 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         CGFloat rootHeight = MAX(CGRectGetHeight(rootView.bounds), 1.0);
         BOOL hasLocalOffset = [element[@"anchor_lx"] isKindOfClass:NSNumber.class] &&
             [element[@"anchor_ly"] isKindOfClass:NSNumber.class];
+        CGFloat localX = [element[@"anchor_lx"] doubleValue];
+        CGFloat localY = [element[@"anchor_ly"] doubleValue];
+        NSDictionary *legacyMatchFrame = [element[@"match_frame"] isKindOfClass:NSDictionary.class]
+            ? element[@"match_frame"] : nil;
+        if (!hasLocalOffset && legacyMatchFrame) {
+            CGFloat savedWidth = [legacyMatchFrame[@"w"] doubleValue];
+            CGFloat savedHeight = [legacyMatchFrame[@"h"] doubleValue];
+            if (savedWidth > 0.0 && savedHeight > 0.0) {
+                localX = [element[@"anchor_dx"] doubleValue] / savedWidth;
+                localY = [element[@"anchor_dy"] doubleValue] / savedHeight;
+                hasLocalOffset = YES;
+            }
+        }
         CGFloat dx = hasLocalOffset
-            ? [element[@"anchor_lx"] doubleValue] * MAX(CGRectGetWidth(anchor.frameInRoot), 1.0)
+            ? localX * MAX(CGRectGetWidth(anchor.frameInRoot), 1.0)
             : [element[@"anchor_dx"] doubleValue] * rootWidth;
         CGFloat dy = hasLocalOffset
-            ? [element[@"anchor_ly"] doubleValue] * MAX(CGRectGetHeight(anchor.frameInRoot), 1.0)
+            ? localY * MAX(CGRectGetHeight(anchor.frameInRoot), 1.0)
             : [element[@"anchor_dy"] doubleValue] * rootHeight;
         CGFloat widthScale = [element[@"anchor_sw"] doubleValue];
         CGFloat heightScale = [element[@"anchor_sh"] doubleValue];

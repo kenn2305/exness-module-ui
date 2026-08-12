@@ -122,20 +122,6 @@ static BOOL MUIEventEndsInBottomNavigation(UIEvent *event, UIWindow *window, CGP
     [[MUIScreenOverlayManager sharedManager] sourceView:self didSetAlpha:alpha];
 }
 
-- (void)setNeedsDisplay {
-    %orig;
-    if ([[MUIScreenOverlayManager sharedManager] sourceContentDidChange:self]) {
-        [[MUIRuntime sharedRuntime] viewHierarchyDidChange:self];
-    }
-}
-
-- (void)setNeedsDisplayInRect:(CGRect)rect {
-    %orig;
-    if ([[MUIScreenOverlayManager sharedManager] sourceContentDidChange:self]) {
-        [[MUIRuntime sharedRuntime] viewHierarchyDidChange:self];
-    }
-}
-
 - (void)didMoveToSuperview {
     %orig;
     [[MUIScreenOverlayManager sharedManager] sourceLifecycleDidChange:self];
