@@ -348,6 +348,10 @@
         NSString *value = [text.string stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if (value.length > 0) [parts addObject:value];
     }
+    if (candidate.isRenderedPrimitive) {
+        if (candidate.text.length > 0) element[@"match_text"] = candidate.text;
+        element[@"match_frame"] = [self normalizedFrameDictionary:candidate.frameInRoot];
+    }
     NSString *recognized = [parts componentsJoinedByString:@" "];
     return recognized.length > 0 ? recognized : nil;
 }

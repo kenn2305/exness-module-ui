@@ -2,6 +2,7 @@
 #import "MUIConfigStore.h"
 #import "MUIScreenCandidate.h"
 #import "MUIScreenLayoutStore.h"
+#import <Vision/Vision.h>
 
 static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
 
@@ -527,6 +528,68 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     return nil;
 }
 
+- (NSString *)normalizedMatchText:(NSString *)value {
+    if (![value isKindOfClass:NSString.class] || value.length == 0) return @"";
+    NSString *folded = [[value stringByFoldingWithOptions:NSDiacriticInsensitiveSearch
+                                                    locale:[NSLocale localeWithLocaleIdentifier:@"vi_VN"]] uppercaseString];
+    NSArray *parts = [folded componentsSeparatedByCharactersInSet:NSCharacterSet.alphanumericCharacterSet.invertedSet];
+    return [parts componentsJoinedByString:@""];
+}
+
+- (NSString *)recognizedTextForCandidate:(MUIScreenCandidate *)candidate {
+    if (candidate.text.length > 0) return candidate.text;
+    CGImageRef image = candidate.image.CGImage;
+    if (!candidate.isRenderedPrimitive || !image ||
+        CGRectGetWidth(candidate.frameInRoot) < 18.0 || CGRectGetHeight(candidate.frameInRoot) < 8.0) return nil;
+    VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] init];
+    request.recognitionLevel = VNRequestTextRecognitionLevelFast;
+    request.usesLanguageCorrection = NO;
+    request.recognitionLanguages = @[@"vi-VN", @"en-US"];
+    VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:image options:@{}];
+    if (![handler performRequests:@[request] error:nil]) return nil;
+    NSMutableArray *parts = [NSMutableArray array];
+    for (VNRecognizedTextObservation *observation in request.results) {
+        NSString *text = [observation topCandidates:1].firstObject.string;
+        if (text.length > 0) [parts addObject:text];
+    }
+    candidate.text = [parts componentsJoinedByString:@" "];
+    return candidate.text;
+}
+
+- (MUIScreenCandidate *)stableRenderedCandidateForElement:(NSDictionary *)element
+                                                      exact:(MUIScreenCandidate *)exact
+                                                   rootView:(UIView *)rootView
+                                                 candidates:(NSArray<MUIScreenCandidate *> *)candidates {
+    NSString *wanted = [self normalizedMatchText:element[@"match_text"]];
+    if (wanted.length > 0) {
+        for (MUIScreenCandidate *candidate in candidates) {
+            if (!candidate.isRenderedPrimitive) continue;
+            NSString *actual = [self normalizedMatchText:[self recognizedTextForCandidate:candidate]];
+            if ([actual isEqualToString:wanted]) return candidate;
+        }
+    }
+    NSDictionary *saved = [element[@"match_frame"] isKindOfClass:NSDictionary.class] ? element[@"match_frame"] : nil;
+    if (saved) {
+        CGFloat rw = MAX(CGRectGetWidth(rootView.bounds), 1.0);
+        CGFloat rh = MAX(CGRectGetHeight(rootView.bounds), 1.0);
+        CGRect expected = [self frameFromDictionary:saved inBounds:rootView.bounds];
+        MUIScreenCandidate *best = nil;
+        CGFloat bestScore = CGFLOAT_MAX;
+        for (MUIScreenCandidate *candidate in candidates) {
+            if (!candidate.isRenderedPrimitive) continue;
+            CGRect frame = candidate.frameInRoot;
+            CGFloat dx = (CGRectGetMidX(frame) - CGRectGetMidX(expected)) / rw;
+            CGFloat dy = (CGRectGetMidY(frame) - CGRectGetMidY(expected)) / rh;
+            CGFloat dw = (CGRectGetWidth(frame) - CGRectGetWidth(expected)) / rw;
+            CGFloat dh = (CGRectGetHeight(frame) - CGRectGetHeight(expected)) / rh;
+            CGFloat score = dx * dx + dy * dy + dw * dw + dh * dh;
+            if (score < bestScore) { best = candidate; bestScore = score; }
+        }
+        if (best) return best;
+    }
+    return exact;
+}
+
 - (MUIScreenCandidate *)candidateForScrollContainerIdentifier:(NSString *)identifier
                                                     candidates:(NSArray<MUIScreenCandidate *> *)candidates {
     if (identifier.length == 0) return nil;
@@ -988,6 +1051,13 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         }
         if (!target && [type isEqualToString:@"existing"] && [targetID isKindOfClass:NSString.class]) {
             target = [self candidateForIdentifier:targetID candidates:candidates];
+        }
+        if ([type isEqualToString:@"existing"] &&
+            (target.isRenderedPrimitive || element[@"match_text"] || element[@"match_frame"])) {
+            target = [self stableRenderedCandidateForElement:element
+                                                       exact:target
+                                                    rootView:rootView
+                                                  candidates:candidates];
         }
         if ([element[@"hidden"] boolValue]) {
             if (target.sourceView) {
