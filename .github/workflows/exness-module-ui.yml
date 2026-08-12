@@ -1,0 +1,120 @@
+name: Build Exness Module UI
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["exness-module-ui-v*"]
+    paths:
+      - "exness-module-ui/**"
+      - ".github/workflows/exness-module-ui.yml"
+  pull_request:
+    paths:
+      - "exness-module-ui/**"
+      - ".github/workflows/exness-module-ui.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "exness-module-ui-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  THEOS: ${{ github.workspace }}/theos
+
+jobs:
+  build:
+    name: Rootless arm64 + arm64e
+    runs-on: macos-15
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: brew install make ldid dpkg
+
+      - name: Install Theos and iOS SDKs
+        run: |
+          git clone --depth=1 --recursive https://github.com/theos/theos.git "$THEOS"
+          rm -rf "$THEOS/sdks"
+          git clone --depth=1 https://github.com/theos/sdks.git "$THEOS/sdks"
+
+      - name: Validate project inputs
+        working-directory: exness-module-ui
+        run: python3 scripts/validate_project.py
+
+      - name: Build rootless package
+        working-directory: exness-module-ui
+        run: |
+          chmod +x layout/DEBIAN/postinst layout/DEBIAN/prerm scripts/build_repo.sh
+          gmake clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Verify package metadata and architectures
+        working-directory: exness-module-ui
+        run: |
+          DEB="$(find packages -name '*.deb' -type f | head -n 1)"
+          test -n "$DEB"
+          dpkg-deb -I "$DEB"
+          dpkg-deb -c "$DEB"
+          DYLIB="$(find .theos/_ -name 'ExnessModuleUI.dylib' -type f | head -n 1)"
+          test -n "$DYLIB"
+          lipo -info "$DYLIB" | tee /tmp/lipo-info.txt
+          grep -q 'arm64' /tmp/lipo-info.txt
+          grep -q 'arm64e' /tmp/lipo-info.txt
+
+      - name: Upload Sileo package
+        uses: actions/upload-artifact@v4
+        with:
+          name: exness-module-ui-rootless
+          path: exness-module-ui/packages/*.deb
+          if-no-files-found: error
+
+      - name: Prepare APT repository
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/exness-module-ui-v')
+        working-directory: exness-module-ui
+        env:
+          REPOSITORY: ${{ github.event.repository.name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          BASE_URL="https://${OWNER}.github.io/${REPOSITORY}"
+          mkdir -p previous-packages
+          if curl -fsSL "$BASE_URL/Packages" -o /tmp/previous-Packages; then
+            while read -r package_path; do
+              test -n "$package_path" || continue
+              curl -fsSL "$BASE_URL/$package_path" \
+                -o "previous-packages/$(basename "$package_path")" || true
+            done < <(awk '/^Filename:/ {print $2}' /tmp/previous-Packages)
+          fi
+          PACKAGE_FILES=(packages/*.deb)
+          for previous in previous-packages/*.deb; do
+            test -e "$previous" && PACKAGE_FILES+=("$previous")
+          done
+          ./scripts/build_repo.sh "$BASE_URL" "${PACKAGE_FILES[@]}"
+
+      - name: Configure GitHub Pages
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/exness-module-ui-v')
+        uses: actions/configure-pages@v5
+
+      - name: Upload APT Pages artifact
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/exness-module-ui-v')
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: exness-module-ui/repo/public
+
+  deploy:
+    name: Publish Sileo repository
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/exness-module-ui-v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

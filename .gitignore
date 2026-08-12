@@ -1,0 +1,5 @@
+.theos/
+packages/
+exness-module-ui/repo/
+exness-module-ui/previous-packages/
+*.deb
