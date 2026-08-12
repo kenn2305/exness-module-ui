@@ -312,7 +312,7 @@
     UILongPressGestureRecognizer *gesture = [[UILongPressGestureRecognizer alloc]
         initWithTarget:self action:@selector(handleDesignerGesture:)];
     gesture.minimumPressDuration = 0.8;
-    gesture.minimumNumberOfTouches = 3;
+    gesture.numberOfTouchesRequired = 3;
     gesture.cancelsTouchesInView = NO;
     [view addGestureRecognizer:gesture];
     self.designerGesture = gesture;

@@ -67,7 +67,7 @@ for invariant in ("%hook UIWindow", "sendEvent", "prepareForPossibleScreenTransi
 runtime = (ROOT / "Sources/MUIRuntime.m").read_text(encoding="utf-8")
 for invariant in (
     "observeWindow",
-    "minimumNumberOfTouches = 3",
+    "numberOfTouchesRequired = 3",
     "selectedNavigationMarkerInView",
     "completePossibleScreenTransition",
     "restoreBaselineWithoutSaving",
