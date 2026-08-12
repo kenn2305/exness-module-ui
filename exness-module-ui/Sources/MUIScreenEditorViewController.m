@@ -1,4 +1,5 @@
 #import <PhotosUI/PhotosUI.h>
+#import <Vision/Vision.h>
 #import "MUIScreenEditorViewController.h"
 #import "MUIConfigStore.h"
 #import "MUIScreenCandidate.h"
@@ -330,6 +331,38 @@
     handle.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
 }
 
+- (NSString *)recognizedTextForRenderedCandidate:(MUIScreenCandidate *)candidate {
+    CGImageRef image = candidate.image.CGImage;
+    if (!candidate.isRenderedPrimitive || !image ||
+        CGRectGetWidth(candidate.frameInRoot) < 18.0 ||
+        CGRectGetHeight(candidate.frameInRoot) < 8.0) return nil;
+    VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] init];
+    request.recognitionLevel = VNRequestTextRecognitionLevelFast;
+    request.usesLanguageCorrection = NO;
+    request.recognitionLanguages = @[@"vi-VN", @"en-US"];
+    VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:image options:@{}];
+    if (![handler performRequests:@[request] error:nil]) return nil;
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (VNRecognizedTextObservation *observation in request.results) {
+        VNRecognizedText *text = [observation topCandidates:1].firstObject;
+        NSString *value = [text.string stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (value.length > 0) [parts addObject:value];
+    }
+    NSString *recognized = [parts componentsJoinedByString:@" "];
+    return recognized.length > 0 ? recognized : nil;
+}
+
+- (void)enrichRenderedCandidatesWithVisibleText {
+    for (MUIScreenCandidate *candidate in self.candidates) {
+        NSString *recognized = [self recognizedTextForRenderedCandidate:candidate];
+        if (recognized.length == 0) continue;
+        candidate.displayName = recognized;
+        candidate.text = recognized;
+        candidate.contentType = @"text";
+        candidate.componentRole = @"SwiftUI text";
+    }
+}
+
 - (void)reloadCanvas {
     for (MUIScreenHandle *handle in self.handleByElementID.allValues) [handle removeFromSuperview];
     [self.handleByElementID removeAllObjects];
@@ -340,6 +373,7 @@
     self.scaleValueLabel.text = @"1.00×";
 
     self.candidates = [[MUIScreenOverlayManager sharedManager] scanCandidatesInRootView:self.rootView tabBar:self.tabBar];
+    [self enrichRenderedCandidatesWithVisibleText];
     for (MUIScreenCandidate *candidate in self.candidates) self.candidateByID[candidate.identifier] = candidate;
 
     [self.elements removeAllObjects];

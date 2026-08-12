@@ -21,7 +21,7 @@ ExnessModuleUI_FILES = \
 	Sources/MUIDesignerViewController.m
 
 ExnessModuleUI_CFLAGS = -fobjc-arc -Wall -Wextra -Wno-unused-parameter
-ExnessModuleUI_FRAMEWORKS = UIKit Foundation PhotosUI UniformTypeIdentifiers
+ExnessModuleUI_FRAMEWORKS = UIKit Foundation PhotosUI UniformTypeIdentifiers Vision
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
