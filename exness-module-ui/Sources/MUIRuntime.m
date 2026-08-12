@@ -537,8 +537,15 @@
         if (!contextController.view.window) contextController = rootController;
         UIViewController *leaf = [self topViewControllerFrom:contextController];
         if (!leaf || [NSStringFromClass(leaf.class) hasPrefix:@"MUI"]) return;
-        UIView *rootView = contextController.view;
-        NSString *screenID = [self screenIDForController:leaf rootView:rootView];
+        // Exness nests a UIKit tab controller inside one shared SwiftUI host.
+        // The selected UIKit controller only contains the header; the actual
+        // account/trade fields live in currentScreenRootView. Always edit the
+        // same root used by the apply engine so every visible drawing leaf is
+        // discoverable and saved under the same screen ID.
+        UIView *rootView = self.currentScreenRootView;
+        if (!rootView || rootView.window != window) rootView = contextController.view;
+        NSString *screenID = (rootView == self.currentScreenRootView && self.currentScreenID.length > 0)
+            ? self.currentScreenID : [self screenIDForController:leaf rootView:rootView];
         [[MUIScreenOverlayManager sharedManager] removeOverlayAndRestoreOriginalsForRootView:rootView];
         MUIScreenEditorViewController *editor = [[MUIScreenEditorViewController alloc]
             initWithRuntime:self
