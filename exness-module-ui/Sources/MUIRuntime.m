@@ -542,8 +542,23 @@
         // account/trade fields live in currentScreenRootView. Always edit the
         // same root used by the apply engine so every visible drawing leaf is
         // discoverable and saved under the same screen ID.
-        UIView *rootView = self.currentScreenRootView;
-        if (!rootView || rootView.window != window) rootView = contextController.view;
+        UIView *rootView = nil;
+        NSUInteger bestCandidateCount = 0;
+        NSArray<UIView *> *possibleRoots = @[
+            self.currentScreenRootView ?: UIView.new,
+            contextController.view ?: UIView.new,
+            rootController.view ?: UIView.new
+        ];
+        for (UIView *possibleRoot in possibleRoots) {
+            if (!possibleRoot.window || possibleRoot.window != window) continue;
+            NSUInteger count = [[MUIScreenOverlayManager sharedManager]
+                scanCandidatesInRootView:possibleRoot tabBar:nil].count;
+            if (!rootView || count > bestCandidateCount) {
+                rootView = possibleRoot;
+                bestCandidateCount = count;
+            }
+        }
+        if (!rootView) rootView = contextController.view;
         NSString *screenID = (rootView == self.currentScreenRootView && self.currentScreenID.length > 0)
             ? self.currentScreenID : [self screenIDForController:leaf rootView:rootView];
         [[MUIScreenOverlayManager sharedManager] removeOverlayAndRestoreOriginalsForRootView:rootView];
