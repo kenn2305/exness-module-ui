@@ -40,8 +40,11 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
 @property (nonatomic, strong) NSMapTable<UIView *, NSMutableArray<UIView *> *> *scrollHostsByRoot;
 @property (nonatomic, strong) NSMapTable<UIView *, NSMapTable<UIView *, NSNumber *> *> *hiddenStatesByRoot;
 @property (nonatomic, strong) NSMapTable<UIView *, NSMapTable<UIView *, NSNumber *> *> *alphaStatesByRoot;
+@property (nonatomic, strong) NSMapTable<UIView *, NSMapTable<UIView *, NSDictionary *> *> *directStatesByRoot;
 @property (nonatomic, strong) NSMapTable<UIView *, NSString *> *screenIDsByRoot;
 @property (nonatomic, strong) NSMapTable<UIView *, NSNumber *> *dirtyRoots;
+@property (nonatomic, strong) NSMapTable<UIView *, UIView *> *attachedOverlaysBySource;
+@property (nonatomic, assign) BOOL synchronizingAttachment;
 @end
 
 @implementation MUIScreenOverlayManager
@@ -60,8 +63,10 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         _scrollHostsByRoot = [NSMapTable weakToStrongObjectsMapTable];
         _hiddenStatesByRoot = [NSMapTable weakToStrongObjectsMapTable];
         _alphaStatesByRoot = [NSMapTable weakToStrongObjectsMapTable];
+        _directStatesByRoot = [NSMapTable weakToStrongObjectsMapTable];
         _screenIDsByRoot = [NSMapTable weakToStrongObjectsMapTable];
         _dirtyRoots = [NSMapTable weakToStrongObjectsMapTable];
+        _attachedOverlaysBySource = [NSMapTable weakToWeakObjectsMapTable];
     }
     return self;
 }
@@ -100,8 +105,38 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     return nil;
 }
 
+- (BOOL)isSwiftUIRenderedPrimitive:(UIView *)view {
+    NSString *name = NSStringFromClass(view.class) ?: @"";
+    return [name containsString:@"CGDrawingView"] ||
+           [name containsString:@"_UIGraphicsView"];
+}
+
+- (UIImage *)snapshotForView:(UIView *)view {
+    CGSize size = view.bounds.size;
+    if (size.width < 1.0 || size.height < 1.0) return nil;
+    UIGraphicsBeginImageContextWithOptions(size, NO, UIScreen.mainScreen.scale);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    if (!context) {
+        UIGraphicsEndImageContext();
+        return nil;
+    }
+    [view.layer renderInContext:context];
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return image;
+}
+
 - (void)invalidateRootView:(UIView *)rootView {
     if (rootView) [self.dirtyRoots setObject:@YES forKey:rootView];
+}
+
+- (void)sourceGeometryDidChange:(UIView *)sourceView {
+    if (self.synchronizingAttachment || !sourceView) return;
+    UIView *overlay = [self.attachedOverlaysBySource objectForKey:sourceView];
+    if (!overlay || overlay.superview != sourceView.superview) return;
+    self.synchronizingAttachment = YES;
+    overlay.frame = sourceView.frame;
+    self.synchronizingAttachment = NO;
 }
 
 - (NSString *)stableTextIdentifierWithBase:(NSString *)base
@@ -197,7 +232,35 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     CGFloat width = CGRectGetWidth(frame);
     CGFloat height = CGRectGetHeight(frame);
     BOOL sensibleSize = width >= 12.0 && height >= 12.0 && width <= 380.0 && height <= 380.0;
-    if (image && sensibleSize && !duplicateImageView) {
+    BOOL renderedPrimitive = [self isSwiftUIRenderedPrimitive:view];
+    BOOL sensiblePrimitive = renderedPrimitive && width >= 4.0 && height >= 4.0 &&
+        width <= CGRectGetWidth(root.bounds) && height <= CGRectGetHeight(root.bounds) * 0.45;
+    if (sensiblePrimitive) {
+        MUIScreenCandidate *candidate = [MUIScreenCandidate new];
+        candidate.sourceView = view;
+        NSString *semantic = view.accessibilityIdentifier;
+        candidate.identifier = semantic.length > 0
+            ? [NSString stringWithFormat:@"%@|%@", NSStringFromClass(view.class), semantic]
+            : [path stringByAppendingString:@"|rendered"];
+        candidate.displayName = view.accessibilityLabel.length > 0
+            ? view.accessibilityLabel : @"SwiftUI field";
+        candidate.contentType = @"rendered";
+        candidate.componentRole = @"SwiftUI field";
+        candidate.image = [self snapshotForView:view];
+        candidate.frameInRoot = frame;
+        candidate.containerView = view.superview;
+        candidate.containerIdentifier = [self parentPathFromPath:path];
+        candidate.frameInContainer = view.frame;
+        UIScrollView *scroll = [self nearestScrollViewForView:view];
+        candidate.scrollContainerView = scroll;
+        candidate.scrollContainerIdentifier = [self pathForAncestor:scroll fromView:view currentPath:path];
+        candidate.scrollContainerFrameInRoot = scroll ? [scroll.superview convertRect:scroll.frame toView:root] : CGRectZero;
+        candidate.scrollingContent = scroll != nil;
+        candidate.actionable = [self canTriggerOriginalActionForSourceView:view];
+        candidate.renderedPrimitive = YES;
+        [results addObject:candidate];
+    }
+    if (image && sensibleSize && !duplicateImageView && !renderedPrimitive) {
         MUIScreenCandidate *candidate = [MUIScreenCandidate new];
         candidate.sourceView = view;
         NSString *semantic = view.accessibilityIdentifier;
@@ -300,6 +363,85 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     return states;
 }
 
+- (NSMapTable<UIView *, NSDictionary *> *)directStatesForRoot:(UIView *)root create:(BOOL)create {
+    NSMapTable *states = [self.directStatesByRoot objectForKey:root];
+    if (!states && create) {
+        states = [NSMapTable weakToStrongObjectsMapTable];
+        [self.directStatesByRoot setObject:states forKey:root];
+    }
+    return states;
+}
+
+- (NSDictionary *)captureDirectStateForView:(UIView *)view inRoot:(UIView *)root {
+    if (!view || !root) return nil;
+    NSMapTable *states = [self directStatesForRoot:root create:YES];
+    NSDictionary *state = [states objectForKey:view];
+    if (state) return state;
+    NSMutableDictionary *captured = [@{
+        @"transform": [NSValue valueWithCGAffineTransform:view.transform],
+        @"hidden": @(view.hidden),
+        @"alpha": @(view.alpha)
+    } mutableCopy];
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        if (label.text) captured[@"label_text"] = label.text;
+        if (label.attributedText) captured[@"label_attributed"] = label.attributedText;
+        if (label.font) captured[@"label_font"] = label.font;
+    } else if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        NSString *title = [button titleForState:UIControlStateNormal];
+        UIImage *image = [button imageForState:UIControlStateNormal];
+        if (title) captured[@"button_title"] = title;
+        if (image) captured[@"button_image"] = image;
+    } else if ([view isKindOfClass:UIImageView.class]) {
+        UIImage *image = ((UIImageView *)view).image;
+        if (image) captured[@"image"] = image;
+    }
+    state = [captured copy];
+    [states setObject:state forKey:view];
+    return state;
+}
+
+- (void)restoreDirectView:(UIView *)view state:(NSDictionary *)state {
+    if (!view || !state) return;
+    view.transform = [state[@"transform"] CGAffineTransformValue];
+    view.hidden = [state[@"hidden"] boolValue];
+    view.alpha = [state[@"alpha"] doubleValue];
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        NSAttributedString *attributed = state[@"label_attributed"];
+        if (attributed) label.attributedText = attributed;
+        else label.text = state[@"label_text"];
+        if (state[@"label_font"]) label.font = state[@"label_font"];
+    } else if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        [button setTitle:state[@"button_title"] forState:UIControlStateNormal];
+        [button setImage:state[@"button_image"] forState:UIControlStateNormal];
+    } else if ([view isKindOfClass:UIImageView.class]) {
+        ((UIImageView *)view).image = state[@"image"];
+    }
+}
+
+- (void)applyDirectGeometryForTarget:(MUIScreenCandidate *)target
+                           rootFrame:(CGRect)rootFrame
+                                root:(UIView *)root {
+    UIView *view = target.sourceView;
+    UIView *parent = view.superview;
+    if (!view || !parent || CGRectIsEmpty(target.frameInRoot)) return;
+    NSDictionary *state = [self captureDirectStateForView:view inRoot:root];
+    CGAffineTransform original = [state[@"transform"] CGAffineTransformValue];
+    CGFloat sx = CGRectGetWidth(rootFrame) / MAX(CGRectGetWidth(target.frameInRoot), 1.0);
+    CGFloat sy = CGRectGetHeight(rootFrame) / MAX(CGRectGetHeight(target.frameInRoot), 1.0);
+    CGPoint desiredRootCenter = CGPointMake(CGRectGetMidX(rootFrame), CGRectGetMidY(rootFrame));
+    CGPoint nativeRootCenter = CGPointMake(CGRectGetMidX(target.frameInRoot), CGRectGetMidY(target.frameInRoot));
+    CGPoint desiredParentCenter = [root convertPoint:desiredRootCenter toView:parent];
+    CGPoint nativeParentCenter = [root convertPoint:nativeRootCenter toView:parent];
+    CGAffineTransform adjustment = CGAffineTransformMakeScale(sx, sy);
+    adjustment.tx = desiredParentCenter.x - nativeParentCenter.x;
+    adjustment.ty = desiredParentCenter.y - nativeParentCenter.y;
+    view.transform = CGAffineTransformConcat(original, adjustment);
+}
+
 - (void)hideOriginalView:(UIView *)view inRoot:(UIView *)root {
     if (!view || !root) return;
     NSMapTable *states = [self hiddenStatesForRoot:root create:YES];
@@ -333,10 +475,17 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         view.alpha = alpha.doubleValue;
     }
     [alphaStates removeAllObjects];
+    NSMapTable *directStates = [self directStatesForRoot:rootView create:NO];
+    for (UIView *view in directStates.keyEnumerator) {
+        [self.attachedOverlaysBySource removeObjectForKey:view];
+        [self restoreDirectView:view state:[directStates objectForKey:view]];
+    }
+    [directStates removeAllObjects];
     [self.hostsByRoot removeObjectForKey:rootView];
     [self.scrollHostsByRoot removeObjectForKey:rootView];
     [self.hiddenStatesByRoot removeObjectForKey:rootView];
     [self.alphaStatesByRoot removeObjectForKey:rootView];
+    [self.directStatesByRoot removeObjectForKey:rootView];
     [self.screenIDsByRoot removeObjectForKey:rootView];
 }
 
@@ -350,6 +499,9 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         if (root && ![roots containsObject:root]) [roots addObject:root];
     }
     for (UIView *root in self.scrollHostsByRoot.keyEnumerator) {
+        if (root && ![roots containsObject:root]) [roots addObject:root];
+    }
+    for (UIView *root in self.directStatesByRoot.keyEnumerator) {
         if (root && ![roots containsObject:root]) [roots addObject:root];
     }
     for (UIView *root in roots) [self removeOverlayAndRestoreOriginalsForRootView:root];
@@ -855,6 +1007,45 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         if (CGRectGetWidth(frame) < 4.0 || CGRectGetHeight(frame) < 4.0) continue;
         BOOL isTextElement = elementIsText ||
             [target.contentType isEqualToString:@"text"];
+        BOOL existingElement = [type isEqualToString:@"existing"] && target.sourceView;
+        BOOL hasReplacementImage = [element[@"icon_path"] isKindOfClass:NSString.class] ||
+                                   [element[@"symbol"] isKindOfClass:NSString.class];
+
+        // UIKit-backed elements can be edited in place. This is the important
+        // difference from the old overlay engine: the original view remains in
+        // its hierarchy, so its scroll behavior, transition animation and
+        // target/action are retained automatically.
+        if (existingElement && !target.isRenderedPrimitive) {
+            [self captureDirectStateForView:target.sourceView inRoot:rootView];
+            [self applyDirectGeometryForTarget:target rootFrame:frame root:rootView];
+            NSString *replacementText = [element[@"text"] isKindOfClass:NSString.class]
+                ? element[@"text"] : nil;
+            if ([target.sourceView isKindOfClass:UILabel.class] && replacementText.length > 0) {
+                ((UILabel *)target.sourceView).text = replacementText;
+            } else if ([target.sourceView isKindOfClass:UIButton.class] && replacementText.length > 0) {
+                [(UIButton *)target.sourceView setTitle:replacementText forState:UIControlStateNormal];
+            }
+            if (hasReplacementImage) {
+                UIImage *replacement = [self imageForElement:element fallback:target.image];
+                if ([element[@"template"] boolValue]) {
+                    replacement = [replacement imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+                }
+                if ([target.sourceView isKindOfClass:UIImageView.class]) {
+                    ((UIImageView *)target.sourceView).image = replacement;
+                } else if ([target.sourceView isKindOfClass:UIButton.class]) {
+                    [(UIButton *)target.sourceView setImage:replacement forState:UIControlStateNormal];
+                }
+            }
+            continue;
+        }
+
+        if (existingElement && target.isRenderedPrimitive) {
+            [self captureDirectStateForView:target.sourceView inRoot:rootView];
+            [self applyDirectGeometryForTarget:target rootFrame:frame root:rootView];
+            // With no content replacement, moving/scaling the original SwiftUI
+            // drawing leaf is enough and preserves every native animation.
+            if (!isTextElement && !hasReplacementImage) continue;
+        }
         if (isTextElement) {
             NSString *text = [element[@"text"] isKindOfClass:NSString.class] ? element[@"text"] : target.text;
             NSString *displayText = text.length > 0 ? text : [self textForElement:element];
@@ -923,7 +1114,12 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
                 [self applyTextStyleFromTarget:target toLabel:label inFrame:textFrame];
                 textOverlay = label;
             }
+            textOverlay.tag = MUIScreenOverlayHostTag;
             [textParent addSubview:textOverlay];
+            if (target.isRenderedPrimitive && target.sourceView && textParent == target.sourceView.superview) {
+                [self.attachedOverlaysBySource setObject:textOverlay forKey:target.sourceView];
+                [self sourceGeometryDidChange:target.sourceView];
+            }
             if (textParent != host) [self trackManagedOverlay:textOverlay forRoot:rootView];
             if (target.sourceView) [self concealOriginalTextView:target.sourceView inRoot:rootView];
             continue;
@@ -987,7 +1183,12 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
             if ([overlay isKindOfClass:UIImageView.class]) ((UIImageView *)overlay).image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
             if ([overlay isKindOfClass:UIButton.class]) [(UIButton *)overlay setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
         }
+        overlay.tag = MUIScreenOverlayHostTag;
         [overlayParent addSubview:overlay];
+        if (target.isRenderedPrimitive && target.sourceView && overlayParent == target.sourceView.superview) {
+            [self.attachedOverlaysBySource setObject:overlay forKey:target.sourceView];
+            [self sourceGeometryDidChange:target.sourceView];
+        }
         if (overlayParent != host) [self trackManagedOverlay:overlay forRoot:rootView];
         if (target.sourceView) [self hideOriginalView:target.sourceView inRoot:rootView];
     }

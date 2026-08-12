@@ -24,6 +24,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSString *componentRole;
 @property (nonatomic, assign, getter=isScrollingContent) BOOL scrollingContent;
 @property (nonatomic, assign, getter=isActionable) BOOL actionable;
+/// SwiftUI renders most Exness fields into leaf drawing views instead of
+/// UILabel/UIImageView instances. These leaves are still real, movable views,
+/// but their text/image payload cannot be mutated through UIKit directly.
+@property (nonatomic, assign, getter=isRenderedPrimitive) BOOL renderedPrimitive;
 @end
 
 NS_ASSUME_NONNULL_END

@@ -12,6 +12,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)removeOverlaysAndRestoreOriginals;
 - (void)removeOverlayAndRestoreOriginalsForRootView:(UIView *)rootView;
 - (void)invalidateRootView:(UIView *)rootView;
+- (void)sourceGeometryDidChange:(UIView *)sourceView;
 - (void)applyScreenID:(NSString *)screenID
              rootView:(UIView *)rootView
                tabBar:(nullable UITabBar *)tabBar;

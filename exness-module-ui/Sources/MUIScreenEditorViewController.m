@@ -651,6 +651,28 @@
         [self editSelectedText];
         return;
     }
+    MUIScreenCandidate *candidate = self.candidateByID[self.selectedHandle.targetID];
+    if (candidate.isRenderedPrimitive) {
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Edit SwiftUI field"
+                                                                       message:@"Move/scale keeps the native field. Choose text to replace its visible content, or image to replace its artwork."
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+        __weak typeof(self) weakSelf = self;
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Edit displayed text" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [weakSelf materializeElementForHandle:weakSelf.selectedHandle];
+            NSMutableDictionary *element = [weakSelf mutableElementForID:weakSelf.selectedHandle.elementID];
+            element[@"content_type"] = @"text";
+            if (![element[@"text"] isKindOfClass:NSString.class]) element[@"text"] = @"Text";
+            [weakSelf presentTextEditorWithExistingElement:element];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Replace with icon/photo" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [weakSelf presentIconSourceForMode:@"replace"];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        sheet.popoverPresentationController.sourceView = self.toolbar;
+        sheet.popoverPresentationController.sourceRect = self.toolbar.bounds;
+        [self presentViewController:sheet animated:YES completion:nil];
+        return;
+    }
     [self presentIconSourceForMode:@"replace"];
 }
 
@@ -795,6 +817,7 @@
             existingElement[@"name"] = text;
             MUIScreenHandle *handle = editedHandle ?: weakSelf.selectedHandle;
             if (handle) {
+                [handle setImage:nil forState:UIControlStateNormal];
                 [handle setTitle:text forState:UIControlStateNormal];
                 [weakSelf styleTextHandle:handle];
                 [weakSelf materializeElementForHandle:handle];
@@ -849,6 +872,12 @@
     if (!self.selectedHandle) return;
     [self materializeElementForHandle:self.selectedHandle];
     NSMutableDictionary *element = [self mutableElementForID:self.selectedHandle.elementID];
+    MUIScreenCandidate *candidate = self.candidateByID[self.selectedHandle.targetID];
+    if (candidate.isRenderedPrimitive) {
+        element[@"content_type"] = @"rendered";
+        [element removeObjectForKey:@"text"];
+        [self.selectedHandle setTitle:nil forState:UIControlStateNormal];
+    }
     [element removeObjectForKey:@"icon_path"];
     [element removeObjectForKey:@"symbol"];
     if (iconPath.length > 0) element[@"icon_path"] = iconPath;
@@ -869,7 +898,7 @@
         self.scaleSlider.value = 1.0;
         self.scaleValueLabel.text = @"1.00×";
     }
-    UIImage *image = [self imageForElement:element fallback:self.candidateByID[self.selectedHandle.targetID].image];
+    UIImage *image = [self imageForElement:element fallback:candidate.image];
     [self.selectedHandle setImage:image forState:UIControlStateNormal];
     self.statusLabel.text = @"Icon replaced. Tap Apply to save.";
 }

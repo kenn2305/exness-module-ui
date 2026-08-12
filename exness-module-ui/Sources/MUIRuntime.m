@@ -19,6 +19,7 @@
 @property (nonatomic, weak) UIView *currentScreenRootView;
 @property (nonatomic, copy) NSString *currentScreenID;
 @property (nonatomic, assign) BOOL hierarchyRefreshQueued;
+@property (nonatomic, assign) NSInteger activeTabSlot;
 @end
 
 @implementation MUIRuntime
@@ -36,6 +37,7 @@
         _currentModules = @[];
         _baselineModules = @[];
         _baselineControllers = @[];
+        _activeTabSlot = NSNotFound;
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
         _disableSavedLayoutForThisLaunch = [defaults boolForKey:@"ExnessModuleUIApplyWatchdog"];
         [defaults setBool:NO forKey:@"ExnessModuleUIApplyWatchdog"];
@@ -151,6 +153,8 @@
         value = ((UILabel *)view).text;
     }
     if (value.length == 0) return nil;
+    value = [value stringByFoldingWithOptions:NSDiacriticInsensitiveSearch
+                                       locale:[NSLocale localeWithLocaleIdentifier:@"vi_VN"]];
     NSCharacterSet *allowed = [NSCharacterSet alphanumericCharacterSet];
     NSArray<NSString *> *parts = [value componentsSeparatedByCharactersInSet:allowed.invertedSet];
     NSString *normalized = [[parts componentsJoinedByString:@"-"] lowercaseString];
@@ -177,15 +181,72 @@
     return nil;
 }
 
+- (NSString *)primaryScreenMarkerInView:(UIView *)view rootView:(UIView *)rootView {
+    if (!view || view.hidden || view.alpha <= 0.01 || view.tag == 0x4D553149 ||
+        [NSStringFromClass(view.class) hasPrefix:@"MUI"]) return nil;
+    NSString *best = nil;
+    CGFloat bestScore = 0.0;
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        CGRect frame = [view.superview convertRect:view.frame toView:rootView];
+        NSString *text = [label.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        BOOL inHeader = CGRectGetMinY(frame) >= 20.0 &&
+            CGRectGetMaxY(frame) <= CGRectGetHeight(rootView.bounds) * 0.22;
+        if (inHeader && text.length > 0 && text.length < 80) {
+            best = [self stableLabelForView:view];
+            bestScore = label.font.pointSize * MAX(CGRectGetWidth(frame), 1.0);
+        }
+    }
+    for (UIView *child in view.subviews) {
+        NSString *candidate = [self primaryScreenMarkerInView:child rootView:rootView];
+        if (candidate.length == 0) continue;
+        CGFloat score = 1.0;
+        if ([child isKindOfClass:UILabel.class]) {
+            score = ((UILabel *)child).font.pointSize * MAX(CGRectGetWidth(child.bounds), 1.0);
+        }
+        if (!best || score > bestScore) {
+            best = candidate;
+            bestScore = score;
+        }
+    }
+    return best;
+}
+
 - (NSString *)screenIDForController:(UIViewController *)controller rootView:(UIView *)rootView {
     NSString *base = [[MUIScreenOverlayManager sharedManager] screenIDForViewController:controller];
+    if (self.activeTabSlot != NSNotFound) {
+        return [NSString stringWithFormat:@"%@|tab-slot:%ld", base, (long)self.activeTabSlot];
+    }
+    NSString *screen = [self primaryScreenMarkerInView:rootView rootView:rootView];
+    NSDictionary<NSString *, NSNumber *> *knownTabs = @{
+        @"tai-khoan": @0, @"giao-dich": @1, @"thong-tin-chuyen-sau": @2,
+        @"hieu-suat": @3, @"ho-so": @4
+    };
+    for (NSString *name in knownTabs) {
+        if ([screen containsString:name]) {
+            self.activeTabSlot = [knownTabs[name] integerValue];
+            return [NSString stringWithFormat:@"%@|tab-slot:%ld", base, (long)self.activeTabSlot];
+        }
+    }
+    if (screen.length > 0) return [NSString stringWithFormat:@"%@|screen:%@", base, screen];
     NSString *marker = [self selectedNavigationMarkerInView:rootView rootView:rootView];
     return marker.length > 0 ? [NSString stringWithFormat:@"%@|tab:%@", base, marker] : base;
 }
 
 - (void)prepareForPossibleScreenTransition {
-    // Do not tear down the outgoing tab. Removing it before UIKit switches the
-    // native hierarchy was the source of the visible blink and 0.5 s mismatch.
+    // Restore before the state mutation in the same input transaction. No
+    // intermediate frame is committed, while a shared SwiftUI root can no
+    // longer carry a previous tab's edited leaves into the next tab.
+    if (self.currentScreenRootView) {
+        [[MUIScreenOverlayManager sharedManager] removeOverlayAndRestoreOriginalsForRootView:self.currentScreenRootView];
+    }
+}
+
+- (void)prepareForTabSelectionAtPoint:(CGPoint)point inWindow:(UIWindow *)window {
+    [self prepareForPossibleScreenTransition];
+    CGFloat width = MAX(CGRectGetWidth(window.bounds), 1.0);
+    NSInteger slot = (NSInteger)floor((point.x / width) * 5.0);
+    self.activeTabSlot = MIN(MAX(slot, 0), 4);
 }
 
 - (void)completePossibleScreenTransition {
@@ -204,7 +265,7 @@
 
 - (void)viewHierarchyDidChange:(UIView *)view {
     if (!view || !self.appWindow || view.window != self.appWindow) return;
-    if ([NSStringFromClass(view.class) hasPrefix:@"MUI"]) return;
+    if ([NSStringFromClass(view.class) hasPrefix:@"MUI"] || view.tag == 0x4D553149) return;
     if (self.currentScreenRootView &&
         (view == self.currentScreenRootView || [view isDescendantOfView:self.currentScreenRootView])) {
         [[MUIScreenOverlayManager sharedManager] invalidateRootView:self.currentScreenRootView];

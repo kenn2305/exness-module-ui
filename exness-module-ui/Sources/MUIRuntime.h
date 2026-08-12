@@ -16,6 +16,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)observeContentViewController:(UIViewController *)viewController;
 - (void)prepareContentViewController:(UIViewController *)viewController;
 - (void)prepareForPossibleScreenTransition;
+- (void)prepareForTabSelectionAtPoint:(CGPoint)point inWindow:(UIWindow *)window;
 - (void)completePossibleScreenTransition;
 - (void)viewHierarchyDidChange:(UIView *)view;
 - (void)refreshCurrentScreenLayout;

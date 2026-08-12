@@ -1,13 +1,18 @@
 #import <UIKit/UIKit.h>
 #import "Sources/MUIRuntime.h"
+#import "Sources/MUIScreenOverlayManager.h"
 
-static BOOL MUIEventEndsInBottomNavigation(UIEvent *event, UIWindow *window) {
+static BOOL MUIEventEndsInBottomNavigation(UIEvent *event, UIWindow *window, CGPoint *pointOut) {
     if (event.type != UIEventTypeTouches || !window) return NO;
-    CGFloat threshold = CGRectGetHeight(window.bounds) * 0.62;
+    CGFloat threshold = MAX(CGRectGetHeight(window.bounds) * 0.80,
+                            CGRectGetHeight(window.bounds) - 120.0);
     for (UITouch *touch in event.allTouches) {
         if (touch.phase != UITouchPhaseEnded) continue;
         CGPoint point = [touch locationInView:window];
-        if (point.y >= threshold) return YES;
+        if (point.y >= threshold) {
+            if (pointOut) *pointOut = point;
+            return YES;
+        }
     }
     return NO;
 }
@@ -30,9 +35,10 @@ static BOOL MUIEventEndsInBottomNavigation(UIEvent *event, UIWindow *window) {
 }
 
 - (void)sendEvent:(UIEvent *)event {
-    BOOL potentialTabChange = MUIEventEndsInBottomNavigation(event, self);
+    CGPoint tabPoint = CGPointZero;
+    BOOL potentialTabChange = MUIEventEndsInBottomNavigation(event, self, &tabPoint);
     if (potentialTabChange) {
-        [[MUIRuntime sharedRuntime] prepareForPossibleScreenTransition];
+        [[MUIRuntime sharedRuntime] prepareForTabSelectionAtPoint:tabPoint inWindow:self];
     }
     %orig;
     if (potentialTabChange) {
@@ -85,6 +91,26 @@ static BOOL MUIEventEndsInBottomNavigation(UIEvent *event, UIWindow *window) {
 %end
 
 %hook UIView
+
+- (void)setFrame:(CGRect)frame {
+    %orig;
+    [[MUIScreenOverlayManager sharedManager] sourceGeometryDidChange:self];
+}
+
+- (void)setCenter:(CGPoint)center {
+    %orig;
+    [[MUIScreenOverlayManager sharedManager] sourceGeometryDidChange:self];
+}
+
+- (void)setBounds:(CGRect)bounds {
+    %orig;
+    [[MUIScreenOverlayManager sharedManager] sourceGeometryDidChange:self];
+}
+
+- (void)setTransform:(CGAffineTransform)transform {
+    %orig;
+    [[MUIScreenOverlayManager sharedManager] sourceGeometryDidChange:self];
+}
 
 - (void)didMoveToWindow {
     %orig;

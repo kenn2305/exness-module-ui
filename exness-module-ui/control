@@ -1,8 +1,8 @@
 Package: com.vietanh.exnessmoduleui
 Name: Exness Module UI
-Version: 0.2.0
+Version: 0.3.0
 Architecture: iphoneos-arm64
-Description: Container-aware visual UI editor for Exness with editable text, images, actions, and scroll-following modules.
+Description: Native-bound GUI editor for Exness SwiftUI/UIKit fields with tab isolation, animation-safe transforms, editable text, images, and actions.
 Maintainer: Viet Anh
 Author: Viet Anh
 Section: Tweaks

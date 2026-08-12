@@ -17,6 +17,7 @@
         _textAlignment = NSTextAlignmentCenter;
         _lineBreakMode = NSLineBreakByTruncatingTail;
         _numberOfLines = 1;
+        _renderedPrimitive = NO;
     }
     return self;
 }
