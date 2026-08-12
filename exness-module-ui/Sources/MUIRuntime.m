@@ -125,9 +125,11 @@
     if (!rootView || !rootView.window) return;
     NSString *screenID = [self screenIDForController:leaf rootView:rootView];
 
-    if (self.currentScreenRootView && self.currentScreenRootView != rootView) {
-        [[MUIScreenOverlayManager sharedManager] removeOverlayAndRestoreOriginalsForRootView:self.currentScreenRootView];
-    } else if (self.currentScreenRootView == rootView &&
+    // Keep each tab's overlays attached to that tab's own root. UIKit hides and
+    // reveals the complete hierarchy atomically, so custom content transitions
+    // in the same frame as the native controls instead of flashing or arriving
+    // on the next run loop.
+    if (self.currentScreenRootView == rootView &&
                self.currentScreenID.length > 0 &&
                ![self.currentScreenID isEqualToString:screenID]) {
         [[MUIScreenOverlayManager sharedManager] removeOverlayAndRestoreOriginalsForRootView:rootView];
@@ -182,10 +184,8 @@
 }
 
 - (void)prepareForPossibleScreenTransition {
-    if (self.currentScreenRootView) {
-        [[MUIScreenOverlayManager sharedManager] removeOverlayAndRestoreOriginalsForRootView:self.currentScreenRootView];
-    }
-    self.currentScreenID = nil;
+    // Do not tear down the outgoing tab. Removing it before UIKit switches the
+    // native hierarchy was the source of the visible blink and 0.5 s mismatch.
 }
 
 - (void)completePossibleScreenTransition {
@@ -205,6 +205,10 @@
 - (void)viewHierarchyDidChange:(UIView *)view {
     if (!view || !self.appWindow || view.window != self.appWindow) return;
     if ([NSStringFromClass(view.class) hasPrefix:@"MUI"]) return;
+    if (self.currentScreenRootView &&
+        (view == self.currentScreenRootView || [view isDescendantOfView:self.currentScreenRootView])) {
+        [[MUIScreenOverlayManager sharedManager] invalidateRootView:self.currentScreenRootView];
+    }
     [self queueHierarchyRefresh];
 }
 

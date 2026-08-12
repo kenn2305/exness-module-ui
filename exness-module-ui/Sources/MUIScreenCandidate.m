@@ -8,7 +8,12 @@
         _identifier = @"";
         _displayName = @"Icon";
         _contentType = @"icon";
+        _componentRole = @"Image";
+        _containerIdentifier = @"";
+        _scrollContainerIdentifier = @"";
         _frameInRoot = CGRectZero;
+        _frameInContainer = CGRectZero;
+        _scrollContainerFrameInRoot = CGRectZero;
         _textAlignment = NSTextAlignmentCenter;
         _lineBreakMode = NSLineBreakByTruncatingTail;
         _numberOfLines = 1;

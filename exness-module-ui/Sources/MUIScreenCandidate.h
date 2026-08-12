@@ -15,6 +15,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) NSLineBreakMode lineBreakMode;
 @property (nonatomic, assign) NSInteger numberOfLines;
 @property (nonatomic, assign) CGRect frameInRoot;
+@property (nonatomic, assign) CGRect frameInContainer;
+@property (nonatomic, weak, nullable) UIView *containerView;
+@property (nonatomic, copy) NSString *containerIdentifier;
+@property (nonatomic, weak, nullable) UIScrollView *scrollContainerView;
+@property (nonatomic, copy) NSString *scrollContainerIdentifier;
+@property (nonatomic, assign) CGRect scrollContainerFrameInRoot;
+@property (nonatomic, copy) NSString *componentRole;
+@property (nonatomic, assign, getter=isScrollingContent) BOOL scrollingContent;
 @property (nonatomic, assign, getter=isActionable) BOOL actionable;
 @end
 

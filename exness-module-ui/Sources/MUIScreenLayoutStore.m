@@ -53,7 +53,7 @@ static NSString * const MUIScreenLayoutErrorDomain = @"com.vietanh.exnessmoduleu
                                                    attributes:nil
                                                         error:error]) return NO;
     NSDictionary *root = @{
-        @"schema_version": @1,
+        @"schema_version": @2,
         @"screens": self.cache ?: @{}
     };
     NSData *json = [NSJSONSerialization dataWithJSONObject:root

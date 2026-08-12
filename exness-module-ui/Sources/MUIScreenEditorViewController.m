@@ -149,6 +149,7 @@
         [self toolbarButton:@"Add" action:@selector(addTapped)],
         [self toolbarButton:@"Replace" action:@selector(replaceTapped)],
         [self toolbarButton:@"Hide/Delete" action:@selector(hideTapped)],
+        [self toolbarButton:@"Follow" action:@selector(followTapped)],
         [self toolbarButton:@"Link" action:@selector(linkTapped)],
         [self toolbarButton:@"Reset" action:@selector(resetTapped)],
         [self toolbarButton:@"Apply" action:@selector(applyTapped)]
@@ -256,6 +257,7 @@
         @"name": candidate.displayName ?: @"Icon/Text",
         @"hidden": @NO,
         @"template": @NO,
+        @"anchor_mode": @"source",
         @"frame": [self normalizedFrameDictionary:candidate.frameInRoot]
     } mutableCopy];
     if ([candidate.contentType isEqualToString:@"text"] && candidate.text.length > 0) {
@@ -347,7 +349,12 @@
 
     for (MUIScreenCandidate *candidate in self.candidates) {
         NSMutableDictionary *element = [self elementForCandidate:candidate create:NO];
-        CGRect rootFrame = element ? [self rootFrameFromDictionary:element[@"frame"]] : candidate.frameInRoot;
+        CGRect rootFrame = element
+            ? [[MUIScreenOverlayManager sharedManager] resolvedRootFrameForElement:element
+                                                                        candidate:candidate
+                                                                         rootView:self.rootView
+                                                                       candidates:self.candidates]
+            : candidate.frameInRoot;
         NSString *elementID = element[@"id"] ?: [@"candidate:" stringByAppendingString:candidate.identifier];
         if ([candidate.contentType isEqualToString:@"text"] || [element[@"content_type"] isEqualToString:@"text"]) {
             [self createTextHandleWithElementID:elementID
@@ -358,6 +365,7 @@
                                       textColor:candidate.textColor
                                            font:candidate.font
                                          hidden:[element[@"hidden"] boolValue]];
+            self.handleByElementID[elementID].actionableTarget = candidate.actionable;
         } else {
             [self createHandleWithElementID:elementID
                                    targetID:candidate.identifier
@@ -371,7 +379,10 @@
 
     for (NSDictionary *element in self.elements) {
         if (![element[@"type"] isEqualToString:@"custom"] && ![element[@"type"] isEqualToString:@"text"]) continue;
-        CGRect rootFrame = [self rootFrameFromDictionary:element[@"frame"]];
+        CGRect rootFrame = [[MUIScreenOverlayManager sharedManager] resolvedRootFrameForElement:element
+                                                                                      candidate:nil
+                                                                                       rootView:self.rootView
+                                                                                     candidates:self.candidates];
         if ([element[@"type"] isEqualToString:@"text"]) {
             [self createTextHandleWithElementID:element[@"id"]
                                           frame:[self editorFrameForRootFrame:rootFrame]
@@ -386,7 +397,13 @@
                                      hidden:NO];
         }
     }
-    self.statusLabel.text = [NSString stringWithFormat:@"%lu icons found • tap, drag, pinch to edit", (unsigned long)self.candidates.count];
+    NSUInteger textCount = 0, imageCount = 0, scrollingCount = 0;
+    for (MUIScreenCandidate *candidate in self.candidates) {
+        if ([candidate.contentType isEqualToString:@"text"]) textCount++; else imageCount++;
+        if (candidate.isScrollingContent) scrollingCount++;
+    }
+    self.statusLabel.text = [NSString stringWithFormat:@"%lu text • %lu images • %lu scroll-bound",
+                             (unsigned long)textCount, (unsigned long)imageCount, (unsigned long)scrollingCount];
 }
 
 - (void)createHandleWithElementID:(NSString *)elementID
@@ -486,8 +503,12 @@
     self.scaleValueLabel.text = [NSString stringWithFormat:@"%.2f×", currentScale];
     handle.layer.borderWidth = 3.0;
     handle.layer.borderColor = UIColor.systemYellowColor.CGColor;
-    NSString *name = [self mutableElementForID:handle.elementID][@"name"] ?: self.candidateByID[handle.targetID].displayName ?: @"Icon/Text";
-    self.statusLabel.text = [NSString stringWithFormat:@"Selected: %@", name];
+    MUIScreenCandidate *candidate = self.candidateByID[handle.targetID];
+    NSString *name = [self mutableElementForID:handle.elementID][@"name"] ?: candidate.displayName ?: @"Icon/Text";
+    NSString *role = candidate.componentRole.length > 0 ? candidate.componentRole : ([self handleRepresentsText:handle] ? @"Text" : @"Image");
+    NSString *mode = [element[@"anchor_mode"] isKindOfClass:NSString.class] ? element[@"anchor_mode"] : (candidate.isScrollingContent ? @"source" : @"root");
+    NSString *attachment = [mode isEqualToString:@"root"] ? @"fixed" : (candidate.isScrollingContent || [mode isEqualToString:@"scroll"] ? @"follows scroll" : @"follows module");
+    self.statusLabel.text = [NSString stringWithFormat:@"%@ • %@ • %@", role, name, attachment];
 }
 
 - (void)scaleSliderChanged:(UISlider *)slider {
@@ -546,7 +567,15 @@
         [self.handleByElementID removeObjectForKey:handle.elementID];
         handle.elementID = element[@"id"];
     }
-    element[@"frame"] = [self normalizedFrameDictionary:[self rootFrameForHandle:handle]];
+    if (!element) return;
+    CGRect rootFrame = [self rootFrameForHandle:handle];
+    element[@"frame"] = [self normalizedFrameDictionary:rootFrame];
+    MUIScreenCandidate *candidate = self.candidateByID[handle.targetID];
+    [[MUIScreenOverlayManager sharedManager] captureAttachmentForElement:element
+                                                               rootFrame:rootFrame
+                                                               candidate:candidate
+                                                                rootView:self.rootView
+                                                              candidates:self.candidates];
 }
 
 - (void)handlePanned:(UIPanGestureRecognizer *)gesture {
@@ -720,6 +749,7 @@
         @"name": @"Custom icon",
         @"hidden": @NO,
         @"template": @(symbol.length > 0),
+        @"anchor_mode": @"auto",
         @"natural_w": @(naturalWidth),
         @"natural_h": @(naturalHeight),
         @"frame": [self normalizedFrameDictionary:frame]
@@ -792,6 +822,7 @@
         @"name": text,
         @"text": text,
         @"hidden": @NO,
+        @"anchor_mode": @"auto",
         @"natural_w": @(naturalSize.width),
         @"natural_h": @(naturalSize.height),
         @"frame": [self normalizedFrameDictionary:frame]
@@ -864,6 +895,39 @@
     element[@"hidden"] = @(hidden);
     self.selectedHandle.backgroundColor = [UIColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:hidden ? 0.3 : 0.12];
     self.statusLabel.text = hidden ? @"Icon will be hidden" : @"Icon restored";
+}
+
+- (void)followTapped {
+    if (!self.selectedHandle) {
+        self.statusLabel.text = @"Select a text or image first";
+        return;
+    }
+    [self materializeElementForHandle:self.selectedHandle];
+    NSMutableDictionary *element = [self mutableElementForID:self.selectedHandle.elementID];
+    if (!element) return;
+    NSString *mode = [element[@"anchor_mode"] isKindOfClass:NSString.class] ? element[@"anchor_mode"] : @"";
+    if ([mode isEqualToString:@"root"]) {
+        MUIScreenCandidate *candidate = self.candidateByID[self.selectedHandle.targetID];
+        element[@"anchor_mode"] = candidate ? @"source" : @"auto";
+        [[MUIScreenOverlayManager sharedManager] captureAttachmentForElement:element
+                                                                   rootFrame:[self rootFrameForHandle:self.selectedHandle]
+                                                                   candidate:candidate
+                                                                    rootView:self.rootView
+                                                                  candidates:self.candidates];
+        NSString *resolved = element[@"anchor_mode"];
+        self.statusLabel.text = [resolved isEqualToString:@"scroll"]
+            ? @"Follow enabled: this item now moves with its scroll region"
+            : @"Follow enabled: this item now moves with its UI module";
+    } else {
+        element[@"anchor_mode"] = @"root";
+        [element removeObjectForKey:@"container_id"];
+        [element removeObjectForKey:@"container_frame"];
+        [element removeObjectForKey:@"anchor_dx"];
+        [element removeObjectForKey:@"anchor_dy"];
+        [element removeObjectForKey:@"anchor_sw"];
+        [element removeObjectForKey:@"anchor_sh"];
+        self.statusLabel.text = @"Fixed enabled: this item stays on the screen while content scrolls";
+    }
 }
 
 - (void)linkTapped {

@@ -12,6 +12,9 @@ Rootless tweak chỉnh giao diện trực tiếp trong Exness trên thiết bị
 - Lưu layout riêng cho mỗi màn hình/tab và áp ngay khi cây giao diện thay đổi.
 - Overlay nằm trong đúng scroll view để text/icon cuộn cùng nội dung; thành phần chức năng cố định không bị ép cuộn.
 - Panel thao tác xuất hiện khi chạm vào phần tử đã Apply.
+- Tự phân loại label, ảnh, tiêu đề nút và phần tử có hành động; editor hiển thị vai trò của mục đang chọn.
+- Mỗi chỉnh sửa có chế độ `Follow` để bám phần tử/vùng cuộn hoặc chuyển sang `Fixed` để đứng yên trên màn hình.
+- Tọa độ được lưu theo container thay vì chỉ theo toàn màn hình, tránh nhảy vị trí sau khi cuộn hoặc đổi tab rồi quay lại.
 
 ## Mở editor
 

@@ -41,6 +41,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
 @property (nonatomic, strong) NSMapTable<UIView *, NSMapTable<UIView *, NSNumber *> *> *hiddenStatesByRoot;
 @property (nonatomic, strong) NSMapTable<UIView *, NSMapTable<UIView *, NSNumber *> *> *alphaStatesByRoot;
 @property (nonatomic, strong) NSMapTable<UIView *, NSString *> *screenIDsByRoot;
+@property (nonatomic, strong) NSMapTable<UIView *, NSNumber *> *dirtyRoots;
 @end
 
 @implementation MUIScreenOverlayManager
@@ -60,6 +61,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         _hiddenStatesByRoot = [NSMapTable weakToStrongObjectsMapTable];
         _alphaStatesByRoot = [NSMapTable weakToStrongObjectsMapTable];
         _screenIDsByRoot = [NSMapTable weakToStrongObjectsMapTable];
+        _dirtyRoots = [NSMapTable weakToStrongObjectsMapTable];
     }
     return self;
 }
@@ -94,31 +96,81 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
 
 - (NSString *)candidateTextForView:(UIView *)view {
     if ([view isKindOfClass:UILabel.class]) return ((UILabel *)view).text;
+    if ([view isKindOfClass:UIButton.class]) return [(UIButton *)view titleForState:UIControlStateNormal];
     return nil;
+}
+
+- (void)invalidateRootView:(UIView *)rootView {
+    if (rootView) [self.dirtyRoots setObject:@YES forKey:rootView];
 }
 
 - (NSString *)stableTextIdentifierWithBase:(NSString *)base
                                       text:(NSString *)text
                                      frame:(CGRect)frame {
-    NSInteger x = (NSInteger)llround(CGRectGetMinX(frame) * 2.0);
-    NSInteger y = (NSInteger)llround(CGRectGetMinY(frame) * 2.0);
-    NSInteger w = (NSInteger)llround(CGRectGetWidth(frame) * 2.0);
-    NSInteger h = (NSInteger)llround(CGRectGetHeight(frame) * 2.0);
-    NSUInteger textHash = text.hash;
-    return [NSString stringWithFormat:@"%@|text:%lu|frame:%ld:%ld:%ld:%ld",
-                                      base ?: @"text",
-                                      (unsigned long)textHash,
-                                      (long)x,
-                                      (long)y,
-                                      (long)w,
-                                      (long)h];
+    // Content and frame are intentionally excluded. Both can change after an
+    // edit, localization, live price update, cell reuse, or a tab round-trip.
+    return [NSString stringWithFormat:@"%@|content:text", base ?: @"text"];
 }
 
 - (NSString *)textIdentifierBaseFromIdentifier:(NSString *)identifier {
     if (![identifier isKindOfClass:NSString.class] || identifier.length == 0) return @"";
     NSRange textRange = [identifier rangeOfString:@"|text:"];
+    if (textRange.location == NSNotFound) {
+        textRange = [identifier rangeOfString:@"|content:text"];
+    }
     if (textRange.location == NSNotFound) return identifier;
     return [identifier substringToIndex:textRange.location];
+}
+
+- (NSString *)sanitizedPathToken:(NSString *)value {
+    if (value.length == 0) return @"";
+    NSCharacterSet *allowed = [NSCharacterSet alphanumericCharacterSet];
+    NSArray<NSString *> *parts = [value componentsSeparatedByCharactersInSet:allowed.invertedSet];
+    NSString *token = [parts componentsJoinedByString:@"-"];
+    while ([token containsString:@"--"]) token = [token stringByReplacingOccurrencesOfString:@"--" withString:@"-"];
+    return token.length > 80 ? [token substringToIndex:80] : token;
+}
+
+- (NSString *)pathSegmentForSubview:(UIView *)subview
+                              index:(NSUInteger)index
+                             parent:(UIView *)parent {
+    NSString *className = NSStringFromClass(subview.class) ?: @"UIView";
+    NSString *semantic = [self sanitizedPathToken:subview.accessibilityIdentifier];
+    if (semantic.length > 0) return [NSString stringWithFormat:@"%@[%@]", className, semantic];
+
+    if ([subview isKindOfClass:UITableViewCell.class]) {
+        UITableView *table = [parent isKindOfClass:UITableView.class] ? (UITableView *)parent : nil;
+        NSIndexPath *path = table ? [table indexPathForCell:(UITableViewCell *)subview] : nil;
+        if (path) return [NSString stringWithFormat:@"%@[s%ldr%ld]", className, (long)path.section, (long)path.row];
+    }
+    if ([subview isKindOfClass:UICollectionViewCell.class]) {
+        UICollectionView *collection = [parent isKindOfClass:UICollectionView.class] ? (UICollectionView *)parent : nil;
+        NSIndexPath *path = collection ? [collection indexPathForCell:(UICollectionViewCell *)subview] : nil;
+        if (path) return [NSString stringWithFormat:@"%@[s%ldi%ld]", className, (long)path.section, (long)path.item];
+    }
+
+    NSUInteger ordinal = 0;
+    for (NSUInteger cursor = 0; cursor < MIN(index, parent.subviews.count); cursor++) {
+        if ([parent.subviews[cursor] isKindOfClass:subview.class]) ordinal++;
+    }
+    return [NSString stringWithFormat:@"%@:%lu", className, (unsigned long)ordinal];
+}
+
+- (NSString *)parentPathFromPath:(NSString *)path {
+    NSRange slash = [path rangeOfString:@"/" options:NSBackwardsSearch];
+    return slash.location == NSNotFound ? path : [path substringToIndex:slash.location];
+}
+
+- (NSString *)pathForAncestor:(UIView *)ancestor
+                      fromView:(UIView *)view
+                   currentPath:(NSString *)path {
+    NSString *result = path;
+    UIView *cursor = view;
+    while (cursor && cursor != ancestor) {
+        result = [self parentPathFromPath:result];
+        cursor = cursor.superview;
+    }
+    return cursor == ancestor ? result : @"";
 }
 
 - (BOOL)viewIsInsideButton:(UIView *)view {
@@ -148,15 +200,25 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     if (image && sensibleSize && !duplicateImageView) {
         MUIScreenCandidate *candidate = [MUIScreenCandidate new];
         candidate.sourceView = view;
-        NSString *semantic = view.accessibilityIdentifier.length > 0 ? view.accessibilityIdentifier : view.accessibilityLabel;
+        NSString *semantic = view.accessibilityIdentifier;
+        NSString *displaySemantic = view.accessibilityLabel.length > 0 ? view.accessibilityLabel : semantic;
         candidate.identifier = semantic.length > 0
             ? [NSString stringWithFormat:@"%@|%@", NSStringFromClass(view.class), semantic]
             : path;
-        candidate.displayName = semantic.length > 0 ? semantic : NSStringFromClass(view.class);
+        candidate.displayName = displaySemantic.length > 0 ? displaySemantic : NSStringFromClass(view.class);
         candidate.contentType = @"icon";
+        candidate.componentRole = [view isKindOfClass:UIButton.class] ? @"Button image" : @"Image";
         candidate.image = image;
         candidate.frameInRoot = frame;
-        candidate.actionable = [view isKindOfClass:UIControl.class];
+        candidate.containerView = view.superview;
+        candidate.containerIdentifier = [self parentPathFromPath:path];
+        candidate.frameInContainer = view.frame;
+        UIScrollView *scroll = [self nearestScrollViewForView:view];
+        candidate.scrollContainerView = scroll;
+        candidate.scrollContainerIdentifier = [self pathForAncestor:scroll fromView:view currentPath:path];
+        candidate.scrollContainerFrameInRoot = scroll ? [scroll.superview convertRect:scroll.frame toView:root] : CGRectZero;
+        candidate.scrollingContent = scroll != nil;
+        candidate.actionable = [self canTriggerOriginalActionForSourceView:view];
         [results addObject:candidate];
     }
     if (text.length > 0 && sensibleSize) {
@@ -164,7 +226,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         if (trimmed.length > 0) {
             MUIScreenCandidate *candidate = [MUIScreenCandidate new];
             candidate.sourceView = view;
-            NSString *semantic = view.accessibilityIdentifier.length > 0 ? view.accessibilityIdentifier : view.accessibilityLabel;
+            NSString *semantic = view.accessibilityIdentifier;
             NSString *baseIdentifier = semantic.length > 0
                 ? [NSString stringWithFormat:@"%@|text|%@", NSStringFromClass(view.class), semantic]
                 : [path stringByAppendingString:@"|text"];
@@ -174,6 +236,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
             candidate.displayName = trimmed;
             candidate.contentType = @"text";
             candidate.text = trimmed;
+            candidate.componentRole = @"Label";
             if ([view isKindOfClass:UILabel.class]) {
                 UILabel *label = (UILabel *)view;
                 candidate.textColor = label.textColor;
@@ -183,6 +246,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
                 candidate.numberOfLines = label.numberOfLines;
             } else if ([view isKindOfClass:UIButton.class]) {
                 UIButton *button = (UIButton *)view;
+                candidate.componentRole = @"Button title";
                 candidate.textColor = [button titleColorForState:UIControlStateNormal] ?: button.tintColor;
                 candidate.font = button.titleLabel.font;
                 candidate.textAlignment = button.titleLabel.textAlignment;
@@ -190,14 +254,23 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
                 candidate.numberOfLines = button.titleLabel.numberOfLines;
             }
             candidate.frameInRoot = frame;
-            candidate.actionable = [view isKindOfClass:UIControl.class];
+            candidate.containerView = view.superview;
+            candidate.containerIdentifier = [self parentPathFromPath:path];
+            candidate.frameInContainer = view.frame;
+            UIScrollView *scroll = [self nearestScrollViewForView:view];
+            candidate.scrollContainerView = scroll;
+            candidate.scrollContainerIdentifier = [self pathForAncestor:scroll fromView:view currentPath:path];
+            candidate.scrollContainerFrameInRoot = scroll ? [scroll.superview convertRect:scroll.frame toView:root] : CGRectZero;
+            candidate.scrollingContent = scroll != nil;
+            candidate.actionable = [self canTriggerOriginalActionForSourceView:view];
             [results addObject:candidate];
         }
     }
 
     NSArray<UIView *> *subviews = view.subviews;
     [subviews enumerateObjectsUsingBlock:^(UIView *subview, NSUInteger index, BOOL *stop) {
-        NSString *childPath = [path stringByAppendingFormat:@"/%@:%lu", NSStringFromClass(subview.class), (unsigned long)index];
+        NSString *segment = [self pathSegmentForSubview:subview index:index parent:view];
+        NSString *childPath = [path stringByAppendingFormat:@"/%@", segment];
         [self scanView:subview path:childPath root:root tabBar:tabBar results:results];
     }];
 }
@@ -288,6 +361,134 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     CGFloat width = [dictionary[@"w"] doubleValue] * CGRectGetWidth(bounds);
     CGFloat height = [dictionary[@"h"] doubleValue] * CGRectGetHeight(bounds);
     return CGRectMake(x, y, width, height);
+}
+
+- (MUIScreenCandidate *)candidateForIdentifier:(NSString *)identifier
+                                    candidates:(NSArray<MUIScreenCandidate *> *)candidates {
+    if (identifier.length == 0) return nil;
+    NSString *wantedBase = [self textIdentifierBaseFromIdentifier:identifier];
+    for (MUIScreenCandidate *candidate in candidates) {
+        if ([candidate.identifier isEqualToString:identifier]) return candidate;
+        if (wantedBase.length > 0 &&
+            [[self textIdentifierBaseFromIdentifier:candidate.identifier] isEqualToString:wantedBase]) return candidate;
+    }
+    return nil;
+}
+
+- (MUIScreenCandidate *)candidateForScrollContainerIdentifier:(NSString *)identifier
+                                                    candidates:(NSArray<MUIScreenCandidate *> *)candidates {
+    if (identifier.length == 0) return nil;
+    for (MUIScreenCandidate *candidate in candidates) {
+        if ([candidate.scrollContainerIdentifier isEqualToString:identifier] && candidate.scrollContainerView) return candidate;
+    }
+    return nil;
+}
+
+- (CGSize)coordinateSizeForScrollView:(UIScrollView *)scrollView {
+    return CGSizeMake(MAX(scrollView.contentSize.width, CGRectGetWidth(scrollView.bounds)),
+                      MAX(scrollView.contentSize.height, CGRectGetHeight(scrollView.bounds)));
+}
+
+- (CGRect)resolvedRootFrameForElement:(NSDictionary *)element
+                            candidate:(MUIScreenCandidate *)candidate
+                             rootView:(UIView *)rootView
+                           candidates:(NSArray<MUIScreenCandidate *> *)candidates {
+    NSString *mode = [element[@"anchor_mode"] isKindOfClass:NSString.class] ? element[@"anchor_mode"] : @"";
+    MUIScreenCandidate *anchor = candidate;
+    if ([mode isEqualToString:@"candidate"]) {
+        anchor = [self candidateForIdentifier:element[@"anchor_target"] candidates:candidates];
+    }
+    if (([mode isEqualToString:@"source"] || [mode isEqualToString:@"candidate"]) && anchor) {
+        CGFloat rootWidth = MAX(CGRectGetWidth(rootView.bounds), 1.0);
+        CGFloat rootHeight = MAX(CGRectGetHeight(rootView.bounds), 1.0);
+        CGFloat dx = [element[@"anchor_dx"] doubleValue] * rootWidth;
+        CGFloat dy = [element[@"anchor_dy"] doubleValue] * rootHeight;
+        CGFloat widthScale = [element[@"anchor_sw"] doubleValue];
+        CGFloat heightScale = [element[@"anchor_sh"] doubleValue];
+        if (widthScale <= 0.0) widthScale = 1.0;
+        if (heightScale <= 0.0) heightScale = 1.0;
+        return CGRectMake(CGRectGetMinX(anchor.frameInRoot) + dx,
+                          CGRectGetMinY(anchor.frameInRoot) + dy,
+                          MAX(CGRectGetWidth(anchor.frameInRoot) * widthScale, 1.0),
+                          MAX(CGRectGetHeight(anchor.frameInRoot) * heightScale, 1.0));
+    }
+    if ([mode isEqualToString:@"scroll"]) {
+        MUIScreenCandidate *containerCandidate = [self candidateForScrollContainerIdentifier:element[@"container_id"]
+                                                                                     candidates:candidates];
+        UIScrollView *scrollView = containerCandidate.scrollContainerView;
+        NSDictionary *local = [element[@"container_frame"] isKindOfClass:NSDictionary.class]
+            ? element[@"container_frame"] : nil;
+        if (scrollView && local) {
+            CGSize size = [self coordinateSizeForScrollView:scrollView];
+            CGRect localFrame = CGRectMake([local[@"x"] doubleValue] * size.width,
+                                           [local[@"y"] doubleValue] * size.height,
+                                           [local[@"w"] doubleValue] * size.width,
+                                           [local[@"h"] doubleValue] * size.height);
+            return [scrollView convertRect:localFrame toView:rootView];
+        }
+    }
+    return [self frameFromDictionary:element[@"frame"] inBounds:rootView.bounds];
+}
+
+- (MUIScreenCandidate *)bestScrollCandidateAtPoint:(CGPoint)point
+                                         candidates:(NSArray<MUIScreenCandidate *> *)candidates {
+    MUIScreenCandidate *best = nil;
+    CGFloat bestArea = CGFLOAT_MAX;
+    for (MUIScreenCandidate *candidate in candidates) {
+        if (!candidate.isScrollingContent || !candidate.scrollContainerView ||
+            !CGRectContainsPoint(candidate.scrollContainerFrameInRoot, point)) continue;
+        CGFloat area = CGRectGetWidth(candidate.scrollContainerFrameInRoot) * CGRectGetHeight(candidate.scrollContainerFrameInRoot);
+        if (area < bestArea) {
+            best = candidate;
+            bestArea = area;
+        }
+    }
+    return best;
+}
+
+- (void)captureAttachmentForElement:(NSMutableDictionary *)element
+                          rootFrame:(CGRect)rootFrame
+                          candidate:(MUIScreenCandidate *)candidate
+                           rootView:(UIView *)rootView
+                         candidates:(NSArray<MUIScreenCandidate *> *)candidates {
+    if (!element || !rootView) return;
+    NSString *requestedMode = [element[@"anchor_mode"] isKindOfClass:NSString.class] ? element[@"anchor_mode"] : @"";
+    if ([requestedMode isEqualToString:@"root"]) return;
+
+    MUIScreenCandidate *anchor = candidate;
+    NSString *type = element[@"type"];
+    BOOL existing = [type isEqualToString:@"existing"];
+    if (!existing) {
+        CGPoint center = CGPointMake(CGRectGetMidX(rootFrame), CGRectGetMidY(rootFrame));
+        anchor = [self bestScrollCandidateAtPoint:center candidates:candidates];
+        if (anchor.scrollContainerView) {
+            UIScrollView *scrollView = anchor.scrollContainerView;
+            CGRect localFrame = [rootView convertRect:rootFrame toView:scrollView];
+            CGSize size = [self coordinateSizeForScrollView:scrollView];
+            element[@"anchor_mode"] = @"scroll";
+            element[@"container_id"] = anchor.scrollContainerIdentifier ?: @"";
+            element[@"container_frame"] = @{
+                @"x": @(CGRectGetMinX(localFrame) / MAX(size.width, 1.0)),
+                @"y": @(CGRectGetMinY(localFrame) / MAX(size.height, 1.0)),
+                @"w": @(CGRectGetWidth(localFrame) / MAX(size.width, 1.0)),
+                @"h": @(CGRectGetHeight(localFrame) / MAX(size.height, 1.0))
+            };
+            return;
+        }
+        element[@"anchor_mode"] = @"root";
+        return;
+    }
+
+    if (anchor) {
+        CGFloat rootWidth = MAX(CGRectGetWidth(rootView.bounds), 1.0);
+        CGFloat rootHeight = MAX(CGRectGetHeight(rootView.bounds), 1.0);
+        element[@"anchor_mode"] = @"source";
+        element[@"anchor_dx"] = @((CGRectGetMinX(rootFrame) - CGRectGetMinX(anchor.frameInRoot)) / rootWidth);
+        element[@"anchor_dy"] = @((CGRectGetMinY(rootFrame) - CGRectGetMinY(anchor.frameInRoot)) / rootHeight);
+        element[@"anchor_sw"] = @(CGRectGetWidth(rootFrame) / MAX(CGRectGetWidth(anchor.frameInRoot), 1.0));
+        element[@"anchor_sh"] = @(CGRectGetHeight(rootFrame) / MAX(CGRectGetHeight(anchor.frameInRoot), 1.0));
+        element[@"container_id"] = anchor.containerIdentifier ?: @"";
+    }
 }
 
 - (UIImage *)imageForElement:(NSDictionary *)element fallback:(UIImage *)fallback {
@@ -501,8 +702,10 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
 - (CGRect)contentFrameForRootFrame:(CGRect)frame
                         scrollView:(UIScrollView *)scrollView
                           rootView:(UIView *)rootView {
-    CGRect visibleFrame = [rootView convertRect:frame toView:scrollView];
-    return CGRectOffset(visibleFrame, scrollView.contentOffset.x, scrollView.contentOffset.y);
+    // UIView coordinate conversion already accounts for UIScrollView.bounds.origin
+    // (contentOffset). Adding it a second time caused the saved overlay to jump
+    // after leaving a tab and returning to it.
+    return [rootView convertRect:frame toView:scrollView];
 }
 
 - (CGRect)contentFrameForExistingTextTarget:(MUIScreenCandidate *)target
@@ -584,17 +787,10 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
 - (void)applyScreenID:(NSString *)screenID rootView:(UIView *)rootView tabBar:(UITabBar *)tabBar {
     if (screenID.length == 0 || !rootView) return;
     NSArray<NSDictionary *> *elements = [[MUIScreenLayoutStore sharedStore] elementsForScreenID:screenID];
-    BOOL hasTextElements = NO;
-    for (NSDictionary *element in elements) {
-        NSString *type = element[@"type"];
-        if ([type isEqualToString:@"text"] || [element[@"content_type"] isEqualToString:@"text"]) {
-            hasTextElements = YES;
-            break;
-        }
-    }
     UIView *cachedHost = [self.hostsByRoot objectForKey:rootView];
     NSString *cachedScreenID = [self.screenIDsByRoot objectForKey:rootView];
-    if (cachedHost && [cachedScreenID isEqualToString:screenID] && !hasTextElements) {
+    BOOL dirty = [[self.dirtyRoots objectForKey:rootView] boolValue];
+    if (cachedHost && [cachedScreenID isEqualToString:screenID] && !dirty) {
         [rootView bringSubviewToFront:cachedHost];
         for (UIView *scrollHost in [self.scrollHostsByRoot objectForKey:rootView]) {
             if (scrollHost.superview) [scrollHost.superview bringSubviewToFront:scrollHost];
@@ -606,6 +802,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     [rootView layoutIfNeeded];
     [self removeOverlayAndRestoreOriginalsForRootView:rootView];
     if (elements.count == 0) {
+        [self.dirtyRoots removeObjectForKey:rootView];
         [CATransaction commit];
         return;
     }
@@ -637,6 +834,9 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         if (!target && elementIsText && [targetID isKindOfClass:NSString.class]) {
             target = textCandidateByBaseID[[self textIdentifierBaseFromIdentifier:targetID]];
         }
+        if (!target && [type isEqualToString:@"existing"] && [targetID isKindOfClass:NSString.class]) {
+            target = [self candidateForIdentifier:targetID candidates:candidates];
+        }
         if ([element[@"hidden"] boolValue]) {
             if (target.sourceView) {
                 if (elementIsText || [target.contentType isEqualToString:@"text"]) {
@@ -648,7 +848,10 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
             continue;
         }
 
-        CGRect frame = [self frameFromDictionary:element[@"frame"] inBounds:rootView.bounds];
+        CGRect frame = [self resolvedRootFrameForElement:element
+                                              candidate:target
+                                               rootView:rootView
+                                             candidates:candidates];
         if (CGRectGetWidth(frame) < 4.0 || CGRectGetHeight(frame) < 4.0) continue;
         BOOL isTextElement = elementIsText ||
             [target.contentType isEqualToString:@"text"];
@@ -658,27 +861,29 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
             BOOL hasOriginalAction = target.sourceView && [self canTriggerOriginalActionForSourceView:target.sourceView];
             UIView *textParent = host;
             CGRect textFrame = frame;
-            BOOL parentAnchoredText = target.sourceView.superview != nil;
-            if (parentAnchoredText) {
+            NSString *anchorMode = [element[@"anchor_mode"] isKindOfClass:NSString.class] ? element[@"anchor_mode"] : @"";
+            BOOL sourceAnchored = target.sourceView.superview != nil &&
+                (![anchorMode isEqualToString:@"root"] && ![anchorMode isEqualToString:@"scroll"]);
+            if (sourceAnchored) {
                 textParent = target.sourceView.superview;
-                textFrame = [self parentFrameForExistingTextTarget:target rootFrame:frame];
-            } else if (!hasOriginalAction) {
-                UIScrollView *scrollView = target.sourceView
-                    ? [self nearestScrollViewForView:target.sourceView]
-                    : [self scrollViewAtRootPoint:CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame))
-                                         rootView:rootView];
+                textFrame = [rootView convertRect:frame toView:textParent];
+            } else if ([anchorMode isEqualToString:@"scroll"] || (!hasOriginalAction && anchorMode.length == 0)) {
+                MUIScreenCandidate *containerCandidate = [self candidateForScrollContainerIdentifier:element[@"container_id"]
+                                                                                              candidates:candidates];
+                UIScrollView *scrollView = containerCandidate.scrollContainerView;
+                if (!scrollView && anchorMode.length == 0) {
+                    scrollView = target.sourceView
+                        ? [self nearestScrollViewForView:target.sourceView]
+                        : [self scrollViewAtRootPoint:CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame))
+                                             rootView:rootView];
+                }
                 if ([self scrollViewHasScrollableContent:scrollView]) {
                     UIView *scrollHost = [self scrollHostForRoot:rootView scrollView:scrollView];
                     if (scrollHost) {
                         textParent = scrollHost;
-                        textFrame = target.sourceView
-                            ? [self contentFrameForExistingTextTarget:target
-                                                            rootFrame:frame
-                                                           scrollView:scrollView
-                                                             rootView:rootView]
-                            : [self contentFrameForRootFrame:frame
-                                                  scrollView:scrollView
-                                                    rootView:rootView];
+                        textFrame = [self contentFrameForRootFrame:frame
+                                                        scrollView:scrollView
+                                                          rootView:rootView];
                     }
                 }
             }
@@ -727,14 +932,33 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         if (!image) continue;
 
         NSString *actionTargetID = element[@"action_target"];
-        MUIScreenCandidate *actionCandidate = candidateByID[actionTargetID ?: targetID];
-        UIControl *actionControl = [actionCandidate.sourceView isKindOfClass:UIControl.class]
-            ? (UIControl *)actionCandidate.sourceView : nil;
+        MUIScreenCandidate *actionCandidate = candidateByID[actionTargetID ?: targetID]
+            ?: [self candidateForIdentifier:(actionTargetID ?: targetID) candidates:candidates];
+        UIControl *actionControl = [self nearestControlForView:actionCandidate.sourceView];
+
+        UIView *overlayParent = host;
+        CGRect overlayFrame = frame;
+        NSString *anchorMode = [element[@"anchor_mode"] isKindOfClass:NSString.class] ? element[@"anchor_mode"] : @"";
+        BOOL attachToSource = target.sourceView.superview &&
+            (![anchorMode isEqualToString:@"root"] && ![anchorMode isEqualToString:@"scroll"]);
+        if (attachToSource) {
+            overlayParent = target.sourceView.superview;
+            overlayFrame = [rootView convertRect:frame toView:overlayParent];
+        } else if ([anchorMode isEqualToString:@"scroll"]) {
+            MUIScreenCandidate *containerCandidate = [self candidateForScrollContainerIdentifier:element[@"container_id"]
+                                                                                          candidates:candidates];
+            UIScrollView *scrollView = containerCandidate.scrollContainerView;
+            UIView *scrollHost = [self scrollHostForRoot:rootView scrollView:scrollView];
+            if (scrollHost) {
+                overlayParent = scrollHost;
+                overlayFrame = [self contentFrameForRootFrame:frame scrollView:scrollView rootView:rootView];
+            }
+        }
 
         UIView *overlay = nil;
         BOOL isCustom = [type isEqualToString:@"custom"];
         if (actionControl || isCustom) {
-            MUIForwardingButton *button = [[MUIForwardingButton alloc] initWithFrame:frame];
+            MUIForwardingButton *button = [[MUIForwardingButton alloc] initWithFrame:overlayFrame];
             [button setImage:image forState:UIControlStateNormal];
             button.imageView.contentMode = UIViewContentModeScaleAspectFit;
             button.tintColor = target.sourceView.tintColor ?: rootView.tintColor;
@@ -753,7 +977,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
             overlay = button;
         } else {
             UIImageView *imageView = [[UIImageView alloc] initWithImage:image];
-            imageView.frame = frame;
+            imageView.frame = overlayFrame;
             imageView.contentMode = UIViewContentModeScaleAspectFit;
             imageView.tintColor = target.sourceView.tintColor ?: rootView.tintColor;
             imageView.userInteractionEnabled = NO;
@@ -763,11 +987,13 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
             if ([overlay isKindOfClass:UIImageView.class]) ((UIImageView *)overlay).image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
             if ([overlay isKindOfClass:UIButton.class]) [(UIButton *)overlay setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
         }
-        [host addSubview:overlay];
+        [overlayParent addSubview:overlay];
+        if (overlayParent != host) [self trackManagedOverlay:overlay forRoot:rootView];
         if (target.sourceView) [self hideOriginalView:target.sourceView inRoot:rootView];
     }
     [CATransaction commit];
     [CATransaction flush];
+    [self.dirtyRoots removeObjectForKey:rootView];
 }
 
 @end

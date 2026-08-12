@@ -93,6 +93,7 @@ for feature in (
     "maximumValue = 50.0",
     "natural_w",
     "saveOriginalImage",
+    "followTapped",
 ):
     if feature not in screen_editor:
         fail(f"screen editor is missing feature: {feature}")
@@ -103,6 +104,8 @@ for invariant in (
     "removeOverlayAndRestoreOriginalsForRootView",
     "scanCandidatesInRootView",
     "presentActionPanelForElement",
+    "captureAttachmentForElement",
+    "resolvedRootFrameForElement",
 ):
     if invariant not in overlay_manager:
         fail(f"screen overlay manager is missing invariant: {invariant}")
