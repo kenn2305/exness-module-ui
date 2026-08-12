@@ -233,9 +233,56 @@
     return [identifier substringToIndex:textRange.location];
 }
 
+- (NSString *)normalizedMatchText:(NSString *)value {
+    if (![value isKindOfClass:NSString.class] || value.length == 0) return @"";
+    NSString *folded = [[value stringByFoldingWithOptions:NSDiacriticInsensitiveSearch
+                                                    locale:[NSLocale localeWithLocaleIdentifier:@"vi_VN"]] uppercaseString];
+    NSArray *parts = [folded componentsSeparatedByCharactersInSet:NSCharacterSet.alphanumericCharacterSet.invertedSet];
+    return [parts componentsJoinedByString:@""];
+}
+
+- (BOOL)isLikelyLiveText:(NSString *)value {
+    if (![value isKindOfClass:NSString.class] || value.length == 0) return NO;
+    NSString *upper = value.uppercaseString;
+    if ([upper isEqualToString:@"MT4"] || [upper isEqualToString:@"MT5"]) return NO;
+    NSUInteger digits = 0;
+    NSUInteger letters = 0;
+    for (NSUInteger index = 0; index < value.length; index++) {
+        unichar character = [value characterAtIndex:index];
+        if ([NSCharacterSet.decimalDigitCharacterSet characterIsMember:character]) digits++;
+        if ([NSCharacterSet.letterCharacterSet characterIsMember:character]) letters++;
+    }
+    if (digits == 0) return NO;
+    if ([value rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"%#$€£¥₫.,:/"]].location != NSNotFound) return YES;
+    return digits >= MAX((NSUInteger)2, letters);
+}
+
+- (BOOL)element:(NSDictionary *)element canBindCandidate:(MUIScreenCandidate *)candidate {
+    if (!candidate.isRenderedPrimitive || !element[@"match_text"]) return YES;
+    NSString *wanted = [self normalizedMatchText:element[@"match_text"]];
+    NSString *actual = [self normalizedMatchText:candidate.text];
+    if ([wanted isEqualToString:actual]) return YES;
+    NSString *policy = [element[@"binding_policy"] isKindOfClass:NSString.class]
+        ? element[@"binding_policy"] : @"";
+    BOOL live = [policy isEqualToString:@"live_slot"] ||
+        (policy.length == 0 && [self isLikelyLiveText:element[@"match_text"]]);
+    if (!live || ![self isLikelyLiveText:candidate.text]) return NO;
+    NSDictionary *saved = [element[@"match_frame"] isKindOfClass:NSDictionary.class]
+        ? element[@"match_frame"] : nil;
+    if (!saved) return NO;
+    CGRect expected = [self rootFrameFromDictionary:saved];
+    CGFloat dx = (CGRectGetMidX(candidate.frameInRoot) - CGRectGetMidX(expected)) /
+        MAX(CGRectGetWidth(self.rootView.bounds), 1.0);
+    CGFloat dy = (CGRectGetMidY(candidate.frameInRoot) - CGRectGetMidY(expected)) /
+        MAX(CGRectGetHeight(self.rootView.bounds), 1.0);
+    return dx * dx + dy * dy <= 0.0009;
+}
+
 - (NSMutableDictionary *)elementForCandidate:(MUIScreenCandidate *)candidate create:(BOOL)create {
     for (NSMutableDictionary *element in self.elements) {
-        if ([element[@"type"] isEqualToString:@"existing"] && [element[@"target_id"] isEqualToString:candidate.identifier]) {
+        if ([element[@"type"] isEqualToString:@"existing"] &&
+            [element[@"target_id"] isEqualToString:candidate.identifier] &&
+            [self element:element canBindCandidate:candidate]) {
             return element;
         }
         if ([element[@"type"] isEqualToString:@"existing"] &&
@@ -243,7 +290,8 @@
             [candidate.contentType isEqualToString:@"text"]) {
             NSString *elementBase = [self textIdentifierBaseFromIdentifier:element[@"target_id"]];
             NSString *candidateBase = [self textIdentifierBaseFromIdentifier:candidate.identifier];
-            if (elementBase.length > 0 && [elementBase isEqualToString:candidateBase]) {
+            if (elementBase.length > 0 && [elementBase isEqualToString:candidateBase] &&
+                [self element:element canBindCandidate:candidate]) {
                 element[@"target_id"] = candidate.identifier;
                 return element;
             }
@@ -263,6 +311,9 @@
     } mutableCopy];
     if ([candidate.contentType isEqualToString:@"text"] && candidate.text.length > 0) {
         element[@"text"] = candidate.text;
+        element[@"original_text"] = candidate.text;
+        element[@"binding_policy"] = [self isLikelyLiveText:candidate.text]
+            ? @"live_slot" : @"static_text";
         element[@"natural_w"] = @(MAX(CGRectGetWidth(candidate.frameInRoot), 8.0));
         element[@"natural_h"] = @(MAX(CGRectGetHeight(candidate.frameInRoot), 8.0));
     }
@@ -395,11 +446,18 @@
             : candidate.frameInRoot;
         NSString *elementID = element[@"id"] ?: [@"candidate:" stringByAppendingString:candidate.identifier];
         if ([candidate.contentType isEqualToString:@"text"] || [element[@"content_type"] isEqualToString:@"text"]) {
+            NSString *policy = [element[@"binding_policy"] isKindOfClass:NSString.class]
+                ? element[@"binding_policy"] : @"";
+            BOOL live = [policy isEqualToString:@"live_slot"] ||
+                (policy.length == 0 && [self isLikelyLiveText:element[@"match_text"]]);
+            NSString *displayText = live
+                ? (candidate.text ?: candidate.displayName ?: @"Live data")
+                : [self textForElement:element ?: @{@"text": candidate.text ?: candidate.displayName ?: @"Text"}];
             [self createTextHandleWithElementID:elementID
                                        targetID:candidate.identifier
                                            type:@"existing"
                                           frame:[self editorFrameForRootFrame:rootFrame]
-                                           text:[self textForElement:element ?: @{@"text": candidate.text ?: candidate.displayName ?: @"Text"}]
+                                           text:displayText
                                       textColor:candidate.textColor
                                            font:candidate.font
                                          hidden:[element[@"hidden"] boolValue]];
@@ -609,6 +667,21 @@
     CGRect rootFrame = [self rootFrameForHandle:handle];
     element[@"frame"] = [self normalizedFrameDictionary:rootFrame];
     MUIScreenCandidate *candidate = self.candidateByID[handle.targetID];
+    if ([element[@"type"] isEqualToString:@"existing"] && candidate.isRenderedPrimitive) {
+        NSString *original = [element[@"match_text"] isKindOfClass:NSString.class]
+            ? element[@"match_text"] : candidate.text;
+        if (original.length > 0) {
+            if (![element[@"match_text"] isKindOfClass:NSString.class]) element[@"match_text"] = original;
+            if (![element[@"original_text"] isKindOfClass:NSString.class]) element[@"original_text"] = original;
+            if (![element[@"binding_policy"] isKindOfClass:NSString.class]) {
+                element[@"binding_policy"] = [self isLikelyLiveText:original]
+                    ? @"live_slot" : @"static_text";
+            }
+        }
+        if (![element[@"match_frame"] isKindOfClass:NSDictionary.class]) {
+            element[@"match_frame"] = [self normalizedFrameDictionary:candidate.frameInRoot];
+        }
+    }
     [[MUIScreenOverlayManager sharedManager] captureAttachmentForElement:element
                                                                rootFrame:rootFrame
                                                                candidate:candidate
@@ -899,6 +972,11 @@
 - (void)editSelectedText {
     NSMutableDictionary *element = [self mutableElementForID:self.selectedHandle.elementID];
     if (![element[@"type"] isEqualToString:@"text"] && ![element[@"content_type"] isEqualToString:@"text"]) return;
+    if ([element[@"type"] isEqualToString:@"existing"] &&
+        [element[@"binding_policy"] isEqualToString:@"live_slot"]) {
+        self.statusLabel.text = @"Server data stays live; you can move and scale this field";
+        return;
+    }
     [self presentTextEditorWithExistingElement:element];
 }
 
@@ -991,6 +1069,8 @@
         [element removeObjectForKey:@"container_frame"];
         [element removeObjectForKey:@"anchor_dx"];
         [element removeObjectForKey:@"anchor_dy"];
+        [element removeObjectForKey:@"anchor_lx"];
+        [element removeObjectForKey:@"anchor_ly"];
         [element removeObjectForKey:@"anchor_sw"];
         [element removeObjectForKey:@"anchor_sh"];
         self.statusLabel.text = @"Fixed enabled: this item stays on the screen while content scrolls";

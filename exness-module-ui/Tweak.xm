@@ -112,8 +112,38 @@ static BOOL MUIEventEndsInBottomNavigation(UIEvent *event, UIWindow *window, CGP
     [[MUIScreenOverlayManager sharedManager] sourceGeometryDidChange:self];
 }
 
+- (void)setHidden:(BOOL)hidden {
+    %orig;
+    [[MUIScreenOverlayManager sharedManager] sourceView:self didSetHidden:hidden];
+}
+
+- (void)setAlpha:(CGFloat)alpha {
+    %orig;
+    [[MUIScreenOverlayManager sharedManager] sourceView:self didSetAlpha:alpha];
+}
+
+- (void)setNeedsDisplay {
+    %orig;
+    if ([[MUIScreenOverlayManager sharedManager] sourceContentDidChange:self]) {
+        [[MUIRuntime sharedRuntime] viewHierarchyDidChange:self];
+    }
+}
+
+- (void)setNeedsDisplayInRect:(CGRect)rect {
+    %orig;
+    if ([[MUIScreenOverlayManager sharedManager] sourceContentDidChange:self]) {
+        [[MUIRuntime sharedRuntime] viewHierarchyDidChange:self];
+    }
+}
+
+- (void)didMoveToSuperview {
+    %orig;
+    [[MUIScreenOverlayManager sharedManager] sourceLifecycleDidChange:self];
+}
+
 - (void)didMoveToWindow {
     %orig;
+    [[MUIScreenOverlayManager sharedManager] sourceLifecycleDidChange:self];
     [[MUIRuntime sharedRuntime] viewHierarchyDidChange:self];
 }
 

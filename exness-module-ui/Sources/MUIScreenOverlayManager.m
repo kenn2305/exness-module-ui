@@ -45,6 +45,8 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
 @property (nonatomic, strong) NSMapTable<UIView *, NSString *> *screenIDsByRoot;
 @property (nonatomic, strong) NSMapTable<UIView *, NSNumber *> *dirtyRoots;
 @property (nonatomic, strong) NSMapTable<UIView *, UIView *> *attachedOverlaysBySource;
+@property (nonatomic, strong) NSMapTable<UIView *, NSDictionary *> *attachmentStatesBySource;
+@property (nonatomic, strong) NSMapTable<UIView *, UIView *> *rootsBySource;
 @property (nonatomic, assign) BOOL synchronizingAttachment;
 @end
 
@@ -68,6 +70,8 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         _screenIDsByRoot = [NSMapTable weakToStrongObjectsMapTable];
         _dirtyRoots = [NSMapTable weakToStrongObjectsMapTable];
         _attachedOverlaysBySource = [NSMapTable weakToWeakObjectsMapTable];
+        _attachmentStatesBySource = [NSMapTable weakToStrongObjectsMapTable];
+        _rootsBySource = [NSMapTable weakToWeakObjectsMapTable];
     }
     return self;
 }
@@ -134,10 +138,130 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
 - (void)sourceGeometryDidChange:(UIView *)sourceView {
     if (self.synchronizingAttachment || !sourceView) return;
     UIView *overlay = [self.attachedOverlaysBySource objectForKey:sourceView];
-    if (!overlay || overlay.superview != sourceView.superview) return;
+    if (!overlay) return;
+    if (!sourceView.window || !sourceView.superview) {
+        overlay.hidden = YES;
+        return;
+    }
     self.synchronizingAttachment = YES;
+    if (overlay.superview != sourceView.superview) {
+        [overlay removeFromSuperview];
+        [sourceView.superview addSubview:overlay];
+    }
     overlay.frame = sourceView.frame;
     self.synchronizingAttachment = NO;
+}
+
+- (void)attachOverlay:(UIView *)overlay
+             toSource:(UIView *)sourceView
+                 root:(UIView *)rootView
+          concealMode:(NSString *)concealMode {
+    if (!overlay || !sourceView || !rootView) return;
+    [self.attachedOverlaysBySource setObject:overlay forKey:sourceView];
+    [self.rootsBySource setObject:rootView forKey:sourceView];
+    [self.attachmentStatesBySource setObject:@{
+        @"conceal_mode": concealMode ?: @"none",
+        @"native_hidden": @(sourceView.hidden),
+        @"native_alpha": @(sourceView.alpha),
+        @"native_parent": [NSValue valueWithNonretainedObject:sourceView.superview]
+    } forKey:sourceView];
+    [self sourceGeometryDidChange:sourceView];
+}
+
+- (void)sourceVisibilityDidChange:(UIView *)sourceView {
+    if (self.synchronizingAttachment || !sourceView) return;
+    UIView *overlay = [self.attachedOverlaysBySource objectForKey:sourceView];
+    NSDictionary *binding = [self.attachmentStatesBySource objectForKey:sourceView];
+    if (!overlay || !binding) return;
+    NSString *mode = binding[@"conceal_mode"];
+    BOOL nativeHidden = [binding[@"native_hidden"] boolValue];
+    CGFloat nativeAlpha = [binding[@"native_alpha"] doubleValue];
+    overlay.hidden = nativeHidden || nativeAlpha < 0.05 || !sourceView.window;
+    overlay.alpha = nativeAlpha > 0.05 ? nativeAlpha : [binding[@"native_alpha"] doubleValue];
+
+    // The app may update visibility on a reused SwiftUI leaf. Preserve that
+    // native state on the bound replacement while keeping the source concealed.
+    self.synchronizingAttachment = YES;
+    if ([mode isEqualToString:@"hidden"]) sourceView.hidden = YES;
+    if ([mode isEqualToString:@"alpha"]) sourceView.alpha = 0.0;
+    self.synchronizingAttachment = NO;
+}
+
+- (void)sourceView:(UIView *)sourceView didSetHidden:(BOOL)hidden {
+    if (self.synchronizingAttachment || !sourceView) return;
+    NSDictionary *binding = [self.attachmentStatesBySource objectForKey:sourceView];
+    if (!binding) return;
+    NSMutableDictionary *updated = [binding mutableCopy];
+    updated[@"native_hidden"] = @(hidden);
+    [self.attachmentStatesBySource setObject:[updated copy] forKey:sourceView];
+    [self sourceVisibilityDidChange:sourceView];
+}
+
+- (void)sourceView:(UIView *)sourceView didSetAlpha:(CGFloat)alpha {
+    if (self.synchronizingAttachment || !sourceView) return;
+    NSDictionary *binding = [self.attachmentStatesBySource objectForKey:sourceView];
+    if (!binding) return;
+    NSMutableDictionary *updated = [binding mutableCopy];
+    updated[@"native_alpha"] = @(alpha);
+    [self.attachmentStatesBySource setObject:[updated copy] forKey:sourceView];
+    [self sourceVisibilityDidChange:sourceView];
+}
+
+- (void)detachSourceView:(UIView *)sourceView {
+    if (!sourceView) return;
+    UIView *root = [self.rootsBySource objectForKey:sourceView];
+    UIView *overlay = [self.attachedOverlaysBySource objectForKey:sourceView];
+    NSDictionary *binding = [self.attachmentStatesBySource objectForKey:sourceView];
+    self.synchronizingAttachment = YES;
+    [overlay removeFromSuperview];
+    NSMapTable *hiddenStates = [self hiddenStatesForRoot:root create:NO];
+    NSNumber *hidden = [hiddenStates objectForKey:sourceView];
+    if (binding[@"native_hidden"]) sourceView.hidden = [binding[@"native_hidden"] boolValue];
+    else if (hidden) sourceView.hidden = hidden.boolValue;
+    [hiddenStates removeObjectForKey:sourceView];
+    NSMapTable *alphaStates = [self alphaStatesForRoot:root create:NO];
+    NSNumber *alpha = [alphaStates objectForKey:sourceView];
+    if (binding[@"native_alpha"]) sourceView.alpha = [binding[@"native_alpha"] doubleValue];
+    else if (alpha) sourceView.alpha = alpha.doubleValue;
+    [alphaStates removeObjectForKey:sourceView];
+    NSMapTable *directStates = [self directStatesForRoot:root create:NO];
+    NSDictionary *direct = [directStates objectForKey:sourceView];
+    if (direct) [self restoreDirectView:sourceView state:direct];
+    [directStates removeObjectForKey:sourceView];
+    self.synchronizingAttachment = NO;
+    [self.attachedOverlaysBySource removeObjectForKey:sourceView];
+    [self.attachmentStatesBySource removeObjectForKey:sourceView];
+    [self.rootsBySource removeObjectForKey:sourceView];
+    if (root) [self invalidateRootView:root];
+}
+
+- (void)sourceLifecycleDidChange:(UIView *)sourceView {
+    if (self.synchronizingAttachment || !sourceView) return;
+    UIView *root = [self.rootsBySource objectForKey:sourceView];
+    if (!root) return;
+    NSDictionary *binding = [self.attachmentStatesBySource objectForKey:sourceView];
+    UIView *nativeParent = [binding[@"native_parent"] nonretainedObjectValue];
+    if (!nativeParent) {
+        NSDictionary *direct = [[self directStatesForRoot:root create:NO] objectForKey:sourceView];
+        nativeParent = [direct[@"parent"] nonretainedObjectValue];
+    }
+    if (!sourceView.window || !sourceView.superview ||
+        (nativeParent && sourceView.superview != nativeParent)) {
+        [self detachSourceView:sourceView];
+        return;
+    }
+    [self sourceGeometryDidChange:sourceView];
+    [self sourceVisibilityDidChange:sourceView];
+}
+
+- (BOOL)sourceContentDidChange:(UIView *)sourceView {
+    if (self.synchronizingAttachment || !sourceView) return NO;
+    // Direct native transforms intentionally survive server-driven redraws.
+    // A replacement overlay must be revalidated because its source may now
+    // represent a loading placeholder or a different recycled SwiftUI field.
+    if (![self.attachedOverlaysBySource objectForKey:sourceView]) return NO;
+    [self detachSourceView:sourceView];
+    return YES;
 }
 
 - (NSString *)stableTextIdentifierWithBase:(NSString *)base
@@ -381,7 +505,8 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     NSMutableDictionary *captured = [@{
         @"transform": [NSValue valueWithCGAffineTransform:view.transform],
         @"hidden": @(view.hidden),
-        @"alpha": @(view.alpha)
+        @"alpha": @(view.alpha),
+        @"parent": [NSValue valueWithNonretainedObject:view.superview]
     } mutableCopy];
     if ([view isKindOfClass:UILabel.class]) {
         UILabel *label = (UILabel *)view;
@@ -400,6 +525,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     }
     state = [captured copy];
     [states setObject:state forKey:view];
+    [self.rootsBySource setObject:root forKey:view];
     return state;
 }
 
@@ -448,18 +574,23 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     NSMapTable *states = [self hiddenStatesForRoot:root create:YES];
     if ([states objectForKey:view]) return;
     [states setObject:@(view.hidden) forKey:view];
+    self.synchronizingAttachment = YES;
     view.hidden = YES;
+    self.synchronizingAttachment = NO;
 }
 
 - (void)concealOriginalTextView:(UIView *)view inRoot:(UIView *)root {
     if (!view || !root) return;
     NSMapTable *states = [self alphaStatesForRoot:root create:YES];
     if (![states objectForKey:view]) [states setObject:@(view.alpha) forKey:view];
+    self.synchronizingAttachment = YES;
     view.alpha = 0.0;
+    self.synchronizingAttachment = NO;
 }
 
 - (void)removeOverlayAndRestoreOriginalsForRootView:(UIView *)rootView {
     if (!rootView) return;
+    self.synchronizingAttachment = YES;
     [[self.hostsByRoot objectForKey:rootView] removeFromSuperview];
     for (UIView *host in [self.scrollHostsByRoot objectForKey:rootView]) {
         [host removeFromSuperview];
@@ -479,6 +610,8 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     NSMapTable *directStates = [self directStatesForRoot:rootView create:NO];
     for (UIView *view in directStates.keyEnumerator) {
         [self.attachedOverlaysBySource removeObjectForKey:view];
+        [self.attachmentStatesBySource removeObjectForKey:view];
+        [self.rootsBySource removeObjectForKey:view];
         [self restoreDirectView:view state:[directStates objectForKey:view]];
     }
     [directStates removeAllObjects];
@@ -488,6 +621,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     [self.alphaStatesByRoot removeObjectForKey:rootView];
     [self.directStatesByRoot removeObjectForKey:rootView];
     [self.screenIDsByRoot removeObjectForKey:rootView];
+    self.synchronizingAttachment = NO;
 }
 
 - (void)removeOverlaysAndRestoreOriginals {
@@ -536,6 +670,36 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     return [parts componentsJoinedByString:@""];
 }
 
+- (BOOL)isLikelyLiveText:(NSString *)value {
+    if (![value isKindOfClass:NSString.class] || value.length == 0) return NO;
+    NSString *upper = value.uppercaseString;
+    if ([upper isEqualToString:@"MT4"] || [upper isEqualToString:@"MT5"]) return NO;
+    NSUInteger digits = 0;
+    NSUInteger letters = 0;
+    NSCharacterSet *decimal = NSCharacterSet.decimalDigitCharacterSet;
+    NSCharacterSet *alphabet = NSCharacterSet.letterCharacterSet;
+    for (NSUInteger index = 0; index < value.length; index++) {
+        unichar character = [value characterAtIndex:index];
+        if ([decimal characterIsMember:character]) digits++;
+        if ([alphabet characterIsMember:character]) letters++;
+    }
+    if (digits == 0) return NO;
+    if ([value rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"%#$€£¥₫.,:/"]].location != NSNotFound) {
+        return YES;
+    }
+    return digits >= MAX((NSUInteger)2, letters);
+}
+
+- (CGFloat)matchScoreForFrame:(CGRect)frame expected:(CGRect)expected rootView:(UIView *)rootView {
+    CGFloat rw = MAX(CGRectGetWidth(rootView.bounds), 1.0);
+    CGFloat rh = MAX(CGRectGetHeight(rootView.bounds), 1.0);
+    CGFloat dx = (CGRectGetMidX(frame) - CGRectGetMidX(expected)) / rw;
+    CGFloat dy = (CGRectGetMidY(frame) - CGRectGetMidY(expected)) / rh;
+    CGFloat dw = (CGRectGetWidth(frame) - CGRectGetWidth(expected)) / rw;
+    CGFloat dh = (CGRectGetHeight(frame) - CGRectGetHeight(expected)) / rh;
+    return dx * dx + dy * dy + dw * dw + dh * dh;
+}
+
 - (NSString *)recognizedTextForCandidate:(MUIScreenCandidate *)candidate {
     if (candidate.text.length > 0) return candidate.text;
     CGImageRef image = candidate.image.CGImage;
@@ -561,33 +725,58 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
                                                    rootView:(UIView *)rootView
                                                  candidates:(NSArray<MUIScreenCandidate *> *)candidates {
     NSString *wanted = [self normalizedMatchText:element[@"match_text"]];
+    NSDictionary *saved = [element[@"match_frame"] isKindOfClass:NSDictionary.class] ? element[@"match_frame"] : nil;
+    CGRect expected = saved ? [self frameFromDictionary:saved inBounds:rootView.bounds] : CGRectNull;
     if (wanted.length > 0) {
+        MUIScreenCandidate *bestTextMatch = nil;
+        CGFloat bestTextScore = CGFLOAT_MAX;
         for (MUIScreenCandidate *candidate in candidates) {
             if (!candidate.isRenderedPrimitive) continue;
             NSString *actual = [self normalizedMatchText:[self recognizedTextForCandidate:candidate]];
-            if ([actual isEqualToString:wanted]) return candidate;
+            if (![actual isEqualToString:wanted]) continue;
+            CGFloat score = saved
+                ? [self matchScoreForFrame:candidate.frameInRoot expected:expected rootView:rootView]
+                : 0.0;
+            if (!bestTextMatch || score < bestTextScore) {
+                bestTextMatch = candidate;
+                bestTextScore = score;
+            }
         }
-    }
-    NSDictionary *saved = [element[@"match_frame"] isKindOfClass:NSDictionary.class] ? element[@"match_frame"] : nil;
-    if (saved) {
-        CGFloat rw = MAX(CGRectGetWidth(rootView.bounds), 1.0);
-        CGFloat rh = MAX(CGRectGetHeight(rootView.bounds), 1.0);
-        CGRect expected = [self frameFromDictionary:saved inBounds:rootView.bounds];
+        if (bestTextMatch) return bestTextMatch;
+
+        // Values controlled by the server can legitimately change their text.
+        // They may reuse the same structural leaf, but it is only accepted when
+        // both the new payload is also data-like and the native slot stayed near
+        // its saved frame. A static label is never allowed to fall back by frame.
+        NSString *policy = [element[@"binding_policy"] isKindOfClass:NSString.class]
+            ? element[@"binding_policy"] : @"";
+        BOOL liveSlot = [policy isEqualToString:@"live_slot"] ||
+            (policy.length == 0 && [self isLikelyLiveText:element[@"match_text"]]);
+        if (!liveSlot || !saved) return nil;
+
         MUIScreenCandidate *best = nil;
         CGFloat bestScore = CGFLOAT_MAX;
         for (MUIScreenCandidate *candidate in candidates) {
             if (!candidate.isRenderedPrimitive) continue;
-            CGRect frame = candidate.frameInRoot;
-            CGFloat dx = (CGRectGetMidX(frame) - CGRectGetMidX(expected)) / rw;
-            CGFloat dy = (CGRectGetMidY(frame) - CGRectGetMidY(expected)) / rh;
-            CGFloat dw = (CGRectGetWidth(frame) - CGRectGetWidth(expected)) / rw;
-            CGFloat dh = (CGRectGetHeight(frame) - CGRectGetHeight(expected)) / rh;
-            CGFloat score = dx * dx + dy * dy + dw * dw + dh * dh;
+            NSString *actualText = [self recognizedTextForCandidate:candidate];
+            if (![self isLikelyLiveText:actualText]) continue;
+            CGFloat score = [self matchScoreForFrame:candidate.frameInRoot expected:expected rootView:rootView];
             if (score < bestScore) { best = candidate; bestScore = score; }
         }
-        if (best) return best;
+        return bestScore <= 0.0009 ? best : nil;
     }
-    return exact;
+
+    // Artwork has no semantic text. Require a close structural match; never
+    // attach a saved icon to an arbitrary nearest SwiftUI view.
+    if (!saved) return exact;
+    MUIScreenCandidate *best = nil;
+    CGFloat bestScore = CGFLOAT_MAX;
+    for (MUIScreenCandidate *candidate in candidates) {
+        if (!candidate.isRenderedPrimitive) continue;
+        CGFloat score = [self matchScoreForFrame:candidate.frameInRoot expected:expected rootView:rootView];
+        if (score < bestScore) { best = candidate; bestScore = score; }
+    }
+    return bestScore <= 0.00045 ? best : nil;
 }
 
 - (MUIScreenCandidate *)candidateForScrollContainerIdentifier:(NSString *)identifier
@@ -616,8 +805,14 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
     if (([mode isEqualToString:@"source"] || [mode isEqualToString:@"candidate"]) && anchor) {
         CGFloat rootWidth = MAX(CGRectGetWidth(rootView.bounds), 1.0);
         CGFloat rootHeight = MAX(CGRectGetHeight(rootView.bounds), 1.0);
-        CGFloat dx = [element[@"anchor_dx"] doubleValue] * rootWidth;
-        CGFloat dy = [element[@"anchor_dy"] doubleValue] * rootHeight;
+        BOOL hasLocalOffset = [element[@"anchor_lx"] isKindOfClass:NSNumber.class] &&
+            [element[@"anchor_ly"] isKindOfClass:NSNumber.class];
+        CGFloat dx = hasLocalOffset
+            ? [element[@"anchor_lx"] doubleValue] * MAX(CGRectGetWidth(anchor.frameInRoot), 1.0)
+            : [element[@"anchor_dx"] doubleValue] * rootWidth;
+        CGFloat dy = hasLocalOffset
+            ? [element[@"anchor_ly"] doubleValue] * MAX(CGRectGetHeight(anchor.frameInRoot), 1.0)
+            : [element[@"anchor_dy"] doubleValue] * rootHeight;
         CGFloat widthScale = [element[@"anchor_sw"] doubleValue];
         CGFloat heightScale = [element[@"anchor_sh"] doubleValue];
         if (widthScale <= 0.0) widthScale = 1.0;
@@ -700,6 +895,10 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         element[@"anchor_mode"] = @"source";
         element[@"anchor_dx"] = @((CGRectGetMinX(rootFrame) - CGRectGetMinX(anchor.frameInRoot)) / rootWidth);
         element[@"anchor_dy"] = @((CGRectGetMinY(rootFrame) - CGRectGetMinY(anchor.frameInRoot)) / rootHeight);
+        element[@"anchor_lx"] = @((CGRectGetMinX(rootFrame) - CGRectGetMinX(anchor.frameInRoot)) /
+            MAX(CGRectGetWidth(anchor.frameInRoot), 1.0));
+        element[@"anchor_ly"] = @((CGRectGetMinY(rootFrame) - CGRectGetMinY(anchor.frameInRoot)) /
+            MAX(CGRectGetHeight(anchor.frameInRoot), 1.0));
         element[@"anchor_sw"] = @(CGRectGetWidth(rootFrame) / MAX(CGRectGetWidth(anchor.frameInRoot), 1.0));
         element[@"anchor_sh"] = @(CGRectGetHeight(rootFrame) / MAX(CGRectGetHeight(anchor.frameInRoot), 1.0));
         element[@"container_id"] = anchor.containerIdentifier ?: @"";
@@ -1059,6 +1258,10 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
                                                     rootView:rootView
                                                   candidates:candidates];
         }
+        // Existing edits are source-bound. If Exness has not created the
+        // corresponding native field yet (loading, off-screen, or another tab),
+        // keep the edit dormant instead of drawing it at a stale saved frame.
+        if ([type isEqualToString:@"existing"] && !target.sourceView) continue;
         if ([element[@"hidden"] boolValue]) {
             if (target.sourceView) {
                 if (elementIsText || [target.contentType isEqualToString:@"text"]) {
@@ -1080,6 +1283,19 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         BOOL existingElement = [type isEqualToString:@"existing"] && target.sourceView;
         BOOL hasReplacementImage = [element[@"icon_path"] isKindOfClass:NSString.class] ||
                                    [element[@"symbol"] isKindOfClass:NSString.class];
+        NSString *nativeText = [element[@"original_text"] isKindOfClass:NSString.class]
+            ? element[@"original_text"] : element[@"match_text"];
+        if (nativeText.length == 0) nativeText = target.text;
+        NSString *requestedText = [element[@"text"] isKindOfClass:NSString.class]
+            ? element[@"text"] : nil;
+        BOOL hasTextReplacement = requestedText.length > 0 && nativeText.length > 0 &&
+            ![[self normalizedMatchText:requestedText] isEqualToString:[self normalizedMatchText:nativeText]];
+        NSString *bindingPolicy = [element[@"binding_policy"] isKindOfClass:NSString.class]
+            ? element[@"binding_policy"] : @"";
+        BOOL preserveLiveContent = [bindingPolicy isEqualToString:@"live_slot"] ||
+            (bindingPolicy.length == 0 && [self isLikelyLiveText:nativeText]);
+        BOOL shouldRenderTextOverlay = [type isEqualToString:@"text"] ||
+            (isTextElement && hasTextReplacement && !preserveLiveContent);
 
         // UIKit-backed elements can be edited in place. This is the important
         // difference from the old overlay engine: the original view remains in
@@ -1088,8 +1304,7 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         if (existingElement && !target.isRenderedPrimitive) {
             [self captureDirectStateForView:target.sourceView inRoot:rootView];
             [self applyDirectGeometryForTarget:target rootFrame:frame root:rootView];
-            NSString *replacementText = [element[@"text"] isKindOfClass:NSString.class]
-                ? element[@"text"] : nil;
+            NSString *replacementText = (!preserveLiveContent && hasTextReplacement) ? requestedText : nil;
             if ([target.sourceView isKindOfClass:UILabel.class] && replacementText.length > 0) {
                 ((UILabel *)target.sourceView).text = replacementText;
             } else if ([target.sourceView isKindOfClass:UIButton.class] && replacementText.length > 0) {
@@ -1114,9 +1329,9 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
             [self applyDirectGeometryForTarget:target rootFrame:frame root:rootView];
             // With no content replacement, moving/scaling the original SwiftUI
             // drawing leaf is enough and preserves every native animation.
-            if (!isTextElement && !hasReplacementImage) continue;
+            if (!shouldRenderTextOverlay && !hasReplacementImage) continue;
         }
-        if (isTextElement) {
+        if (shouldRenderTextOverlay) {
             NSString *text = [element[@"text"] isKindOfClass:NSString.class] ? element[@"text"] : target.text;
             NSString *displayText = text.length > 0 ? text : [self textForElement:element];
             BOOL hasOriginalAction = target.sourceView && [self canTriggerOriginalActionForSourceView:target.sourceView];
@@ -1187,8 +1402,10 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
             textOverlay.tag = MUIScreenOverlayHostTag;
             [textParent addSubview:textOverlay];
             if (target.isRenderedPrimitive && target.sourceView && textParent == target.sourceView.superview) {
-                [self.attachedOverlaysBySource setObject:textOverlay forKey:target.sourceView];
-                [self sourceGeometryDidChange:target.sourceView];
+                [self attachOverlay:textOverlay
+                           toSource:target.sourceView
+                               root:rootView
+                        concealMode:@"alpha"];
             }
             if (textParent != host) [self trackManagedOverlay:textOverlay forRoot:rootView];
             if (target.sourceView) [self concealOriginalTextView:target.sourceView inRoot:rootView];
@@ -1256,8 +1473,10 @@ static NSInteger const MUIScreenOverlayHostTag = 0x4D553149;
         overlay.tag = MUIScreenOverlayHostTag;
         [overlayParent addSubview:overlay];
         if (target.isRenderedPrimitive && target.sourceView && overlayParent == target.sourceView.superview) {
-            [self.attachedOverlaysBySource setObject:overlay forKey:target.sourceView];
-            [self sourceGeometryDidChange:target.sourceView];
+            [self attachOverlay:overlay
+                       toSource:target.sourceView
+                           root:rootView
+                    concealMode:@"hidden"];
         }
         if (overlayParent != host) [self trackManagedOverlay:overlay forRoot:rootView];
         if (target.sourceView) [self hideOriginalView:target.sourceView inRoot:rootView];
