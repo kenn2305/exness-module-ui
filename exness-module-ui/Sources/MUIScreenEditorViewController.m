@@ -266,6 +266,10 @@
         element[@"natural_w"] = @(MAX(CGRectGetWidth(candidate.frameInRoot), 8.0));
         element[@"natural_h"] = @(MAX(CGRectGetHeight(candidate.frameInRoot), 8.0));
     }
+    if (candidate.isRenderedPrimitive) {
+        if (candidate.text.length > 0) element[@"match_text"] = candidate.text;
+        element[@"match_frame"] = [self normalizedFrameDictionary:candidate.frameInRoot];
+    }
     [self.elements addObject:element];
     return element;
 }
@@ -347,10 +351,6 @@
         VNRecognizedText *text = [observation topCandidates:1].firstObject;
         NSString *value = [text.string stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if (value.length > 0) [parts addObject:value];
-    }
-    if (candidate.isRenderedPrimitive) {
-        if (candidate.text.length > 0) element[@"match_text"] = candidate.text;
-        element[@"match_frame"] = [self normalizedFrameDictionary:candidate.frameInRoot];
     }
     NSString *recognized = [parts componentsJoinedByString:@" "];
     return recognized.length > 0 ? recognized : nil;
